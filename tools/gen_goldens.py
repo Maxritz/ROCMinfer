@@ -64,7 +64,8 @@ def parse_doc_digests(text: str) -> dict[str, str]:
     between the artifact cell and the digest cell.
     """
     digests: dict[str, str] = {}
-    row = re.compile(r"^\|[^|]*`([^`]+\.gguf)`[^|]*\|[^|]*\|\s*`([0-9a-f]{64})`", re.MULTILINE)
+    row = re.compile(r"^\|[^|]*`[^|]*?([A-Za-z0-9_.\-]+\.gguf)`[^|]*\|[^|]*\|\s*`([0-9a-f]{64})`",
+                     re.MULTILINE)
     for name, digest in row.findall(text):
         digests.setdefault(name, digest)
     return digests

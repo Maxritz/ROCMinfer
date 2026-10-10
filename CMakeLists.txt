@@ -88,3 +88,27 @@ add_test(NAME sha256 COMMAND rocminfer_sha256_tests)
 add_executable(rocminfer_payload_tests tests/test_rocmfp4_payload.cpp)
 target_link_libraries(rocminfer_payload_tests PRIVATE rocminfer_core)
 add_test(NAME rocmfp4_payload COMMAND rocminfer_payload_tests)
+
+# Golden cross-check: the committed artifacts must exist. The comparison itself
+# runs through Python, which is not a build dependency, so it is registered only
+# when an interpreter is present at configure time.
+find_program(ROCMINFER_PYTHON NAMES python3 python)
+if(ROCMINFER_PYTHON AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/docs/goldens/artifacts/tiny-Q4_0_ROCMFP4.gguf")
+    add_test(NAME golden_crosscheck_dual
+             COMMAND "${ROCMINFER_PYTHON}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/crosscheck_decode.py"
+                     "$<TARGET_FILE:rocminfer>"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/docs/goldens/artifacts/tiny-Q4_0_ROCMFP4.gguf")
+    add_test(NAME golden_crosscheck_fast
+             COMMAND "${ROCMINFER_PYTHON}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/crosscheck_decode.py"
+                     "$<TARGET_FILE:rocminfer>"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/docs/goldens/artifacts/tiny-Q4_0_ROCMFP4_FAST.gguf")
+    add_test(NAME golden_digest_verify
+             COMMAND "${ROCMINFER_PYTHON}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_goldens.py" --verify
+                     "${CMAKE_CURRENT_SOURCE_DIR}/docs/goldens/artifacts/tiny-src-f32.gguf"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/docs/goldens/artifacts/tiny-Q4_0_ROCMFP4.gguf"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/docs/goldens/artifacts/tiny-Q4_0_ROCMFP4_FAST.gguf")
+endif()

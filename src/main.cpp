@@ -62,7 +62,9 @@ void print_usage(std::ostream& os, std::string_view program) {
        << "  floor                     Measure and print the tracing instrumentation floor.\n"
        << "  inspect <file.gguf>       Print the GGUF manifest: architecture, tensor table, formats.\n"
        << "  validate <file.gguf>      Parse the manifest and verify every tensor fits in the file.\n"
-       << "  decode <file.gguf> [name] Decode one ROCmFP4 tensor; print stats and a SHA-256 golden.\n"
+       << "  decode <file.gguf> [name] [--json]\n"
+       << "                           Decode one ROCmFP4 tensor. Default prints stats and a payload\n"
+       << "                           digest; --json emits decoded weights for cross-checking.\n"
        << "  digest <file.gguf>        Print the SHA-256 of the whole artifact, for pinning.\n"
        << "\n"
        << "Global options:\n"
@@ -212,8 +214,14 @@ void print_file_digest(const char* path) {
     std::cout << "sha256 " << path << "\n" << hash.hex_digest() << "\n";
 }
 
-/// Decode one ROCmFP4 tensor and report statistics plus a payload digest.
-int decode_tensor(const char* path, const std::string& tensor_name) {
+/**
+ * @brief Decode one ROCmFP4 tensor and report statistics plus a payload digest.
+ * @param[in] path         Path to the GGUF artifact, NUL-terminated.
+ * @param[in] tensor_name  Tensor to decode, or empty for the first ROCmFPX tensor.
+ * @param[in] json_output  Emit decoded weights as JSON instead of a summary.
+ * @return Process exit status: 0 on success, 1 on failure.
+ */
+int decode_tensor(const char* path, const std::string& tensor_name, bool json_output) {
     rocminfer::GgufReader reader;
     const int open_status = reader.open(path);
     if (open_status != 0) {
@@ -265,19 +273,20 @@ int decode_tensor(const char* path, const std::string& tensor_name) {
         return kExitError;
     }
 
-    std::cout << "tensor: " << info->name << "\n"
-              << "  format: " << format->name << " (" << format->block_bytes
-              << " B/block, " << format->bits_per_weight << " bpw, dual_scale="
-              << (format->dual_scale ? "yes" : "no") << ")\n"
-              << "  dims:";
+    // The human-readable header goes to stderr in JSON mode so stdout is a
+    // single parseable document.
+    std::ostream& report = json_output ? std::cerr : std::cout;
+    report << "tensor: " << info->name << "\n"
+           << "  format: " << format->name << " (" << format->block_bytes
+           << " B/block, " << format->bits_per_weight << " bpw, dual_scale="
+           << (format->dual_scale ? "yes" : "no") << ")\n"
+           << "  dims:";
     for (std::uint64_t dim : info->dimensions) {
-        std::cout << " " << dim;
+        report << " " << dim;
     }
-    std::cout << "\n  payload bytes: " << payload.size() << "\n"
-              << "  payload sha256: " << rocminfer::Sha256::hex(payload.data(), payload.size())
-              << "\n";
-
-    // Decode a bounded prefix for statistics.
+    report << "\n  payload bytes: " << payload.size() << "\n"
+           << "  payload sha256: "
+           << rocminfer::Sha256::hex(payload.data(), payload.size()) << "\n";
     const std::size_t block_bytes = format->block_bytes;
     const std::size_t blocks = std::min<std::size_t>(payload.size() / block_bytes, 1u << 20);
     if (blocks == 0) {
@@ -292,6 +301,28 @@ int decode_tensor(const char* path, const std::string& tensor_name) {
     if (status != 0) {
         std::cerr << "rocminfer: decode failed: " << status_text(status) << "\n";
         return kExitError;
+    }
+
+    if (json_output) {
+        // Machine-readable dump for cross-checking against an independent
+        // implementation. Weights are emitted as their raw IEEE-754 bit
+        // patterns rather than decimal text: JSON has no hex-float literal and
+        // decimal formatting is not guaranteed to round-trip, whereas the bit
+        // pattern is exact and unambiguous.
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &out[0], sizeof(bits));
+        std::cout << "{\"tensor\":\"" << info->name << "\",\"format\":\""
+                  << format->name << "\",\"encoding\":\"ieee754_bits\","
+                  << "\"count\":" << out.size() << ",\"values\":[";
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            if (i != 0) {
+                std::cout << ',';
+            }
+            std::memcpy(&bits, &out[i], sizeof(bits));
+            std::cout << bits;
+        }
+        std::cout << "]}\n";
+        return kExitOk;
     }
 
     float minimum = out[0];
@@ -319,6 +350,7 @@ int main(int argc, char** argv) {
     bool want_floor = false;
     bool want_help = false;
     bool want_version = false;
+    bool want_json = false;
     std::string command;
     std::string positional;
     std::string extra;
@@ -336,6 +368,10 @@ int main(int argc, char** argv) {
         }
         if (arg == "--profile-floor") {
             want_floor = true;
+            continue;
+        }
+        if (arg == "--json") {
+            want_json = true;
             continue;
         }
         if (arg == "--") {
@@ -423,7 +459,7 @@ int main(int argc, char** argv) {
         const int decode_status = [&]() {
             rocminfer::TraceScope scope(recorder, "tensor-decode",
                                         rocminfer::TraceDomain::kHost);
-            return decode_tensor(positional.c_str(), extra);
+            return decode_tensor(positional.c_str(), extra, want_json);
         }();
         if (recorder.enabled()) {
             recorder.measure_floor();
