@@ -1,0 +1,493 @@
+{
+  "qwen38-27b": {
+    "display_name": "Qwen 3.8 / 27B UltraQuality",
+    "category": "Dense / Agentic Reasoning",
+    "hf_repo": "julianmb/Qwen-3.8-27B-ROCmFP4-FAST-GGUF",
+    "default_variant": "ROCmFP4_FAST",
+    "variants": {
+      "ROCmFP4_FAST": {
+        "filename": "Qwen3.8-27B-ROCmFP4-FAST.gguf",
+        "bpw": 4.26,
+        "size_gib": 13.55,
+        "min_vram_gib": 16.0,
+        "sha256": "fb89c78d2be91cdb68eaaaa45b1270710bf34aa721dc1f0b9e3aa7b98d2e1da9",
+        "source": "unknown (pre-registry); unsloth-Q8_0 requant validated equivalent 2026-08-21"
+      },
+      "ROCmFP8": {
+        "filename": "Qwen3.8-27B-ROCmFP8.gguf",
+        "bpw": 8.25,
+        "size_gib": 26.25,
+        "min_vram_gib": 30.0,
+        "sha256": "0bf5bfc9f946090af2d41b388ccb4d627e916c7250517c36a0de37d6eaccfd8e"
+      },
+      "ROCmFP4_STRIX_LEAN": {
+        "filename": "Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf",
+        "bpw": 4.34,
+        "size_gib": 13.82,
+        "min_vram_gib": 16.0,
+        "sha256": "537044e272d8dadc6a11f08c66ec350a382b66e57f2040d5710101a3c52f269f"
+      },
+      "Q3_K_M": {
+        "filename": "Qwen3.8-27B-Q3_K_M.gguf",
+        "bpw": 3.95,
+        "size_gib": 12.56,
+        "min_vram_gib": 15.0,
+        "sha256": "298edea3f8dc042dbf951014671843ac74a6f7e8cad2da8cbcf0650ae5414600"
+      },
+      "Q3_K_S": {
+        "filename": "Qwen3.8-27B-Q3_K_S.gguf",
+        "bpw": 3.59,
+        "size_gib": 11.4,
+        "min_vram_gib": 14.0,
+        "sha256": "0d6417cd423f46b831ff2761f9c1efa34b6da1f1d79d92aaa88b2ef3b94371d4"
+      },
+      "ROCmFP2": {
+        "filename": "Qwen3.8-27B-ROCmFP2.gguf",
+        "bpw": 2.69,
+        "size_gib": 8.56,
+        "min_vram_gib": 11.0,
+        "sha256": "0f827852dc5fe63fc500c6d67e21280873267c7a79d94e93d15885edf7730a66"
+      }
+    },
+    "run_config": {
+      "ctx_size": 131072,
+      "max_ctx_size": 262144,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "mtp_enabled": true,
+      "draft_n": 4,
+      "draft_p": 0.0,
+      "kv_cache_type_k": "q8_0",
+      "kv_cache_type_v": "q8_0",
+      "threads": 16
+    }
+  },
+  "nemotron-3.5-30b": {
+    "display_name": "NVIDIA Nemotron 3.5 Lightning 30B",
+    "category": "High-Speed MoE / Instruct",
+    "hf_repo": "julianmb/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-ROCmFP4-GGUF",
+    "default_variant": "ROCmFP4_FAST",
+    "variants": {
+      "ROCmFP4_FAST": {
+        "filename": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-ROCmFP4-FAST.gguf",
+        "bpw": 4.25,
+        "size_gib": 14.8,
+        "min_vram_gib": 16.0,
+        "sha256": ""
+      },
+      "ROCmFP4_STRIX_LEAN": {
+        "filename": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-ROCmFP4-STRIX_LEAN.gguf",
+        "bpw": 4.38,
+        "size_gib": 15.2,
+        "min_vram_gib": 16.0,
+        "sha256": ""
+      }
+    },
+    "run_config": {
+      "ctx_size": 262144,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "mtp_enabled": true,
+      "draft_n": 6,
+      "draft_p": 0.6,
+      "kv_cache_type_k": "q8_0",
+      "kv_cache_type_v": "q8_0",
+      "threads": 16
+    }
+  },
+  "ornith-1.5-35b": {
+    "display_name": "Ornith 1.5 35B-A3B MoE",
+    "category": "Agentic Coding & MoE Reasoning",
+    "hf_repo": "julianmb/Ornith-1.5-35B-A3B-ROCmFP4-GGUF",
+    "default_variant": "ROCmFP4",
+    "variants": {
+      "ROCmFP4": {
+        "filename": "Ornith-1.5-35B-A3B-ROCmFP4.gguf",
+        "bpw": 4.29,
+        "size_gib": 18.16,
+        "min_vram_gib": 22.0,
+        "sha256": "0f907917a1bfe4e0ca0d281e5709dcf34b6277063e94fab29491bb5c80fda696",
+        "source": "ornith-ai/Ornith-1.5-35B-A3B-GGUF Q8_0 Aug-24 MTP refresh (--allow-requantize)"
+      },
+      "ROCmFP8": {
+        "filename": "Ornith-1.5-35B-A3B-ROCmFP8.gguf",
+        "bpw": 8.25,
+        "size_gib": 36.8,
+        "min_vram_gib": 38.0,
+        "sha256": ""
+      },
+      "Q4_K_M": {
+        "filename": "Ornith-1.5-35B-Q4_K_M.gguf",
+        "bpw": 4.85,
+        "size_gib": 21.8,
+        "min_vram_gib": 24.0,
+        "sha256": "ca6ea26329c88b78ffd90a85163be2e746c2fafd1024f56db47e499f117f9a7f"
+      },
+      "Q5_K_M": {
+        "filename": "Ornith-1.5-35B-Q5_K_M.gguf",
+        "bpw": 5.5,
+        "size_gib": 25.2,
+        "min_vram_gib": 28.0,
+        "sha256": ""
+      },
+      "Q6_K": {
+        "filename": "Ornith-1.5-35B-Q6_K.gguf",
+        "bpw": 6.55,
+        "size_gib": 29.5,
+        "min_vram_gib": 32.0,
+        "sha256": ""
+      },
+      "Q8_0": {
+        "filename": "Ornith-1.5-35B-Q8_0.gguf",
+        "bpw": 8.25,
+        "size_gib": 36.8,
+        "min_vram_gib": 38.0,
+        "sha256": ""
+      },
+      "BF16": {
+        "filename": "Ornith-1.5-35B-BF16.gguf",
+        "bpw": 16.0,
+        "size_gib": 70.0,
+        "min_vram_gib": 74.0,
+        "sha256": ""
+      }
+    },
+    "mmproj": {
+      "filename": "mmproj-Ornith-1.5-35B-BF16.gguf",
+      "hf_repo": "julianmb/Ornith-1.5-35B-A3B-ROCmFP4-GGUF",
+      "size_gib": 0.84,
+      "sha256": "d9ce31026d1cb1f3f8d5152e2e2a014d9d2b302b6c93a7dc07bb0a0487f52837"
+    },
+    "run_config": {
+      "ctx_size": 131072,
+      "max_ctx_size": 262144,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "mtp_enabled": true,
+      "draft_n": 4,
+      "draft_p": 0.6,
+      "kv_cache_type_k": "q8_0",
+      "kv_cache_type_v": "q8_0",
+      "threads": 16,
+      "reasoning_format": "deepseek"
+    }
+  },
+  "ornith-35b": {
+    "display_name": "Ornith 1.0 35B ROCmFPX",
+    "category": "Long-Context Multi-Slot Agent",
+    "hf_repo": "julianmb/Ornith-1.0-35B-ROCmFPX-StrixHalo",
+    "default_variant": "ROCmFPX_Speed",
+    "variants": {
+      "ROCmFPX_Speed": {
+        "filename": "Ornith-1.0-35B-ROCmFPX-Speed-StrixHalo.gguf",
+        "bpw": 4.15,
+        "size_gib": 19.2,
+        "min_vram_gib": 22.0,
+        "sha256": ""
+      },
+      "ROCmFPX_Quality": {
+        "filename": "Ornith-1.0-35B-ROCmFPX-Quality-StrixHalo.gguf",
+        "bpw": 6.85,
+        "size_gib": 31.4,
+        "min_vram_gib": 34.0,
+        "sha256": ""
+      }
+    },
+    "run_config": {
+      "ctx_size": 262144,
+      "slots": 16,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "mtp_enabled": false,
+      "threads": 16
+    }
+  },
+  "deepseek-v4-flash": {
+    "display_name": "DeepSeek V4 Flash 284B MoE",
+    "category": "Ultra-Scale MoE Reasoning",
+    "hf_repo": "julianmb/DeepSeek-V4-Flash-0731-IQ2XXS-STRIX",
+    "default_variant": "IQ2_XXS",
+    "variants": {
+      "IQ2_XXS": {
+        "filename": "DeepSeek-V4-Flash-0731-IQ2XXS-STRIX.gguf",
+        "bpw": 2.06,
+        "size_gib": 86.7,
+        "min_vram_gib": 90.0,
+        "sha256": ""
+      }
+    },
+    "run_config": {
+      "ctx_size": 163840,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "mtp_enabled": false,
+      "threads": 16
+    }
+  },
+  "laguna-s21": {
+    "display_name": "Laguna S 2.1 StrixKVSpine v4",
+    "category": "General Knowledge & Chat",
+    "hf_repo": "julianmb/Laguna-S-2.1-ROCmFP4-StrixKVSpine-v4",
+    "default_variant": "ROCmFP4_StrixKVSpine",
+    "variants": {
+      "ROCmFP4_StrixKVSpine": {
+        "filename": "laguna-s-2.1-ROCmFP4-StrixKVSpine-v4.gguf",
+        "bpw": 4.25,
+        "size_gib": 61.2,
+        "min_vram_gib": 64.0,
+        "sha256": "ea1d854a72c47ec8e72c16ea91b8ff3cd5e1620b834df175f683c86f27dc26d6"
+      }
+    },
+    "run_config": {
+      "ctx_size": 131072,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "mtp_enabled": false,
+      "threads": 16,
+      "backend": "vulkan"
+    }
+  },
+  "qwen38-flash-next": {
+    "display_name": "Qwen 3.8 Flash Next 125B MoE",
+    "category": "Next-Gen Multimodal MoE / Ultra-Sparse",
+    "hf_repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+    "default_variant": "UD-IQ1_S",
+    "engine": "ROCmFPX (port-qwen4exp, PR #98)",
+    "variants": {
+      "UD-IQ1_S": {
+        "filename": "UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf",
+        "bpw": 1.56,
+        "size_gib": 72.55,
+        "min_ram_gib": 75.0,
+        "kld_mean": 0.37514,
+        "same_top_pct": 80.239,
+        "sha256": "",
+        "source": "unsloth dynamic v3.0 from Qwen/Qwen3.8-Flash-Next BF16; measured bring-up on Strix Halo Vulkan RADV (27.3 tok/s)"
+      },
+      "UD-Q4_K_XL": {
+        "filename": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-N.gguf",
+        "bpw": 4.5,
+        "size_gib": 111.3,
+        "min_ram_gib": 112.0,
+        "kld_mean": 0.044715,
+        "same_top_pct": 93.481,
+        "sha256": "",
+        "source": "unsloth dynamic v3.0 from Qwen/Qwen3.8-Flash-Next BF16",
+        "status": "pending-upload"
+      },
+      "IQ4_XS": {
+        "filename": "Qwen3.8-Flash-Next-IQ4_XS.gguf",
+        "hf_repo": "julianmb/Qwen3.8-Flash-Next-IQ4_XS-GGUF",
+        "bpw": 4.25,
+        "size_gib": 115.5,
+        "min_ram_gib": 120.0,
+        "sha256": "4afdd8f70742b3c0e9cb1ce1c139503a285d0dad643ec88b7034e028a4c7b390",
+        "source": "q4rocm: Paris-verified, 97 F32 tensors fixed (hc_norm +1), published 2026-08-28"
+      },
+      "IQ4_XS_PLE": {
+        "filename": "Qwen3.8-Flash-Next-IQ4_XS-PLE.gguf",
+        "hf_repo": "julianmb/Qwen3.8-Flash-Next-IQ4_XS-GGUF",
+        "bpw": 4.25,
+        "size_gib": 91.0,
+        "min_ram_gib": 96.0,
+        "sha256": "",
+        "source": "q4rocm: early experimental split-PLE variant (91G)"
+      },
+      "ROCmFP4_FAST": {
+        "filename": "Qwen3.8-Flash-Next-ROCmFP4_FAST.gguf",
+        "hf_repo": "julianmb/Qwen3.8-Flash-Next-IQ4_XS-GGUF",
+        "bpw": 4.25,
+        "size_gib": 113.1,
+        "min_ram_gib": 120.0,
+        "sha256": "",
+        "source": "q4rocm: Paris-verified ROCmFP4_FAST (114G), fix 61b6a3b48, engine a/b 472 t/s prefill"
+      },
+      "ROCmFP4_FAST_ple16": {
+        "filename": "Qwen3.8-Flash-Next-ROCmFP4-FAST-v2-ple16.gguf",
+        "hf_repo": "agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF",
+        "bpw": 4.15,
+        "size_gib": 87.06,
+        "min_ram_gib": 96.0,
+        "sha256": "",
+        "source": "agentionai: v2 split-PLE 16-tensor format, 100% GPU VRAM resident with MTP"
+      }
+    },
+    "run_config": {
+      "ctx_size": 8192,
+      "max_ctx_size": 262144,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "mtp_enabled": false,
+      "tensor_overrides": [
+        [
+          "ple_ngram_embd",
+          "CPU"
+        ]
+      ],
+      "ubatch": 512,
+      "threads": 16,
+      "reasoning_format": "deepseek",
+      "sampling_thinking": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0
+      },
+      "sampling_instruct": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "presence_penalty": 1.5
+      }
+    },
+    "_release_notes": {
+      "arch_base": "Qwen4 (next-gen)",
+      "gguf_arch_key": "qwen4exp \u2014 Supported via ROCmFPX PR #98 / upstream PR #27742",
+      "arch_type": "Multimodal MoE + PLE N-gram embeddings (51B F16 lookup table)",
+      "total_params_b": 125,
+      "ngram_embed_b": 51,
+      "active_params_b": 6,
+      "attention": "GDN hybrid (36L) + Qwen Sparse Attention (12L, micro-block r=4)",
+      "bring_up_measured_20260827": {
+        "quant": "UD-IQ1_S",
+        "prefill_tps": 78.4,
+        "decode_tps": 27.3,
+        "ctx": 8192,
+        "flags": "-ngl 99 -ot ple_ngram_embd=CPU -fa on -ub 512"
+      },
+      "storage_note": "GGUF must live on ext4; ntfs-3g/FUSE cannot mmap (~4 MB/s reads, load hangs)",
+      "memory_fit_128gb": "UD-Q4_K_XL ~112 GiB fits; ROCmFP4_FAST requant deferred until BF16/FP8 host pool available"
+    }
+  },
+  "ling3-flash": {
+    "display_name": "Ling 3.0 Flash 124B MoE",
+    "category": "Ultra-Scale MoE / Long-Context",
+    "engine": "ROCmFPX (bailingmoe3 arch w/ KDA + NextN loader; measured on build-rocmfpx 11475/08213ad5b)",
+    "hf_repo": "inclusionAI/Ling-3.0-flash-GGUF",
+    "default_variant": "Q4_K_M",
+    "run_config": {
+      "ctx_size": 8192,
+      "flash_attn": false,
+      "max_ctx_size": 262144,
+      "mtp_enabled": true,
+      "draft_n": 2,
+      "draft_p": 0.6,
+      "n_gpu_layers": 99,
+      "threads": 16,
+      "sampling_instruct": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20
+      }
+    },
+    "variants": {
+      "Q4_K_M": {
+        "filename": "Q4_K_M/Ling-3.0-flash-Q4_K_M-00001-of-00002.gguf",
+        "hf_repo": "inclusionAI/Ling-3.0-flash-GGUF",
+        "bpw": 4.85,
+        "size_gib": 71.72,
+        "min_vram_gib": 80.0,
+        "sha256": "24ff06f1ab74546a91f7c07bd725b3015896bbe9dd82ab0e5838be9ed06a6dcf",
+        "source": "inclusionAI official GGUF, pulled 2026-09-05, both shards byte-exact + GGUF magic verified; coherence QA pass, PPL 4.6064"
+      },
+      "Q8_0": {
+        "filename": "Q8_0/Ling-3.0-flash-Q8_0-00001-of-00003.gguf",
+        "hf_repo": "inclusionAI/Ling-3.0-flash-GGUF",
+        "bpw": 8.5,
+        "size_gib": 126.32,
+        "min_vram_gib": 132.0,
+        "sha256": "0f4a559e4b18bade45f8e45b44b9ac7f267584948761fe68687c38ca3a6011c0",
+        "source": "inclusionAI official GGUF, pulled 2026-09-05, 3 shards byte-exact + GGUF magic verified; requant source ONLY \u2014 full -ngl 99 load of the 126 GiB file hangs 124G-UMA boxes (attempted 2026-09-06: system thrashed to reboot, no perplexity obtainable)"
+      }
+    },
+    "_release_notes": {
+      "total_params_b": 124,
+      "active_params_b": 5.1,
+      "arch_type": "Hybrid-linear MoE: 35x Kimi Delta Attention + 7x Gated MLA (5:1), 512 routed experts (8 active) + 1 shared, vocab 157184",
+      "gguf_arch_key": "bailingmoe3 \u2014 in ROCmFPX fork (KDA + NextN loader); NOT yet in stock llama.cpp",
+      "memory_fit_128gb": "Q4_K_M ~72 GiB fits with ~45G headroom; bounded ctx 8192 mandatory (GGUF default 262K hangs the box); 128K ctx adds only ~5.4G VSZ (MLA/KDA)",
+      "bring_up_measured_20260905": {
+        "quant": "Q4_K_M",
+        "ctx": 8192,
+        "flags": "--jinja -dev Vulkan0 -ngl 99 -c 8192 -fa off",
+        "decode_tps": 45.23,
+        "mtp_tps": "55.1 (n2/p0.6, 94.3% acceptance; sweep winner)",
+        "pp512_vulkan": 372.68,
+        "pp512_rocm": "391.80 (v1.7.0 prebuilt engine, build skew noted)",
+        "tg128_rocm": "35.96 (v1.7.0 prebuilt engine)",
+        "ppl_wikitext2": "4.6064 +/- 0.0275 (597 chunks)",
+        "draft_n": 2
+      },
+      "mtp_status": "works (no stub assert): 11-config sweep 2026-09-06 \u2014 n2/p0.6 wins at 55.1 tok/s avg, 94.3% acceptance; p=0.6 dominates p=0.0 at every depth; depth 4+ regresses (rollback cost); ships enabled (n2/p0.6)",
+      "flash_attention": "must stay off (-fa off) \u2014 probed 2026-09-06: -fa on keeps Paris correct but loops math twice ('11 x 14...' for 17x23); all shipped runs use -fa off",
+      "rocmfp4_verdict": "PARKED \u2014 Q4_0_ROCMFP4_FAST (63.27G, 4.26bpw): PPL 7.04 vs 4.61 + incoherent generation (Turkish loops, ' Leuco.'); Q4_0_ROCMFP4_STRIX_LEAN (63.35G): repetitive garbage (' Loving-20 20...'). DIAG control (Q4_K_M -> FAST, 63.27G) fails identically (Chinese loops for math) \u2014 breakage is SOURCE-INDEPENDENT, not the Q8_0 band path. All gated on fresh servers, load logs clean. NOT published. Q4_K_M remains the serving quant.",
+      "storage_note": "weights on ext4 at /mnt/ssd2/models/ling3-flash; hub references via models/ling3-flash symlinks"
+    }
+  },
+  "nex-n2.5-mini": {
+    "display_name": "Nex N2.5 Mini 35B-A3B MoE (+ vision)",
+    "category": "Agentic Reasoning & Coding",
+    "engine": "ROCmFPX (qwen35moe arch w/ hybrid linear attention + vision mmproj; measured on build-rocmfpx 11475/334f10d81)",
+    "hf_repo": "julianmb/Nex-N2.5-mini-ROCmFP4-GGUF",
+    "default_variant": "ROCmFP4_STRIX_LEAN",
+    "variants": {
+      "ROCmFP4_STRIX_LEAN": {
+        "filename": "Nex-N2.5-mini-ROCmFP4-STRIX_LEAN.gguf",
+        "bpw": 4.29,
+        "size_gib": 17.32,
+        "min_vram_gib": 22.0,
+        "sha256": "406c96dbab1994998137e5cf093c4094f9af8be5c1e3268ed6284670bca2d06e",
+        "source": "quantized from abenzerps/Nex-N2.5-mini-GGUF Q4_K_M via ROCmFPX llama-quantize Q4_0_ROCMFP4_STRIX_LEAN on 2026-09-09"
+      },
+      "Q4_K_M": {
+        "filename": "Nex-N2.5-mini-Q4_K_M.gguf",
+        "hf_repo": "abenzerps/Nex-N2.5-mini-GGUF",
+        "bpw": 4.88,
+        "size_gib": 19.71,
+        "min_vram_gib": 24.0,
+        "sha256": "dd296f683c798a3e4058fb1ef8c462e6a4cc8b89cd196742a8e5a3da4057fbb3",
+        "source": "abenzerps/Nex-N2.5-mini-GGUF official quant from nex-agi/Nex-N2.5-mini"
+      }
+    },
+    "mmproj": {
+      "filename": "mmproj-Nex-N2.5-mini.gguf",
+      "hf_repo": "julianmb/Nex-N2.5-mini-ROCmFP4-GGUF",
+      "size_gib": 0.84,
+      "sha256": "4734f7323dfc0e8dcd5c7c408991aad438021aeab761d223aec0b38a4457ca83"
+    },
+    "run_config": {
+      "ctx_size": 32768,
+      "max_ctx_size": 262144,
+      "n_gpu_layers": 99,
+      "flash_attn": true,
+      "threads": 16,
+      "reasoning_format": "deepseek",
+      "sampling_instruct": {
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 40
+      }
+    },
+    "_release_notes": {
+      "total_params_b": 34.66,
+      "active_params_b": 3.0,
+      "arch_type": "Hybrid-linear MoE: 30x Gated DeltaNet + 10x Full Attention (3:1), 256 routed experts (8 active) + 1 shared, vocab 248320",
+      "gguf_arch_key": "qwen35moe",
+      "memory_fit_128gb": "ROCmFP4_STRIX_LEAN 17.3 GiB fits with ~105G headroom; 32K context fits with minimal memory overhead",
+      "bring_up_measured_20260909": {
+        "quant": "ROCmFP4_STRIX_LEAN",
+        "ctx": 8192,
+        "flags": "--jinja -dev Vulkan0 -ngl 99 -c 8192 -fa on",
+        "decode_tps_vulkan": 76.92,
+        "pp512_vulkan": 642.37,
+        "decode_tps_rocm": 68.62,
+        "pp512_rocm": 1028.18,
+        "q4_k_m_vulkan_tg128": 72.76,
+        "q4_k_m_rocm_pp512": 907.44
+      },
+      "vision": "Supported via mmproj-Nex-N2.5-mini.gguf (858 MB)",
+      "thinking": "Agentic Thinking adaptive reasoning supported via reasoning_format deepseek",
+      "storage_note": "weights on ext4 at /mnt/ssd2/models/nex-n2.5-mini; hub references via models/nex-n2.5-mini symlinks"
+    }
+  }
+}
