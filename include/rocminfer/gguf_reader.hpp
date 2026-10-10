@@ -185,6 +185,20 @@ public:
     GgufReader& operator=(const GgufReader&) = delete;
 
     /**
+     * @brief Move the reader, transferring the open file and manifest.
+     * @param[in] other Reader to drain; left in the closed (empty) state.
+     * @post `*this` is open and holds `other`'s state; `other.is_open()` is false.
+     */
+    GgufReader(GgufReader&& other) noexcept;
+
+    /**
+     * @brief Release the current handle, then adopt `other`'s state.
+     * @param[in] other Reader to drain; left in the closed (empty) state.
+     * @post `*this` is open and holds `other`'s state; `other.is_open()` is false.
+     */
+    GgufReader& operator=(GgufReader&& other) noexcept;
+
+    /**
      * @brief Open and parse a GGUF file from disk.
      * @param[in] path NUL-terminated path to the file, non-NULL.
      * @return 0 on success; EINVAL for a null path; EBUSY if already open;

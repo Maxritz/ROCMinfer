@@ -57,6 +57,10 @@ inline constexpr std::uint32_t QK_ROCMFP4_FAST_BYTES = 17;
 /// Largest valid scale byte; `0x7F` is the unsigned NaN encoding.
 inline constexpr std::uint8_t ROCMFP4_SCALE_MAX = 0x7EU;
 
+/// Number of entries in the UE4M3 scale lookup table (indices 0..ROCMFP4_SCALE_MAX).
+inline constexpr std::size_t kScaleTableSize =
+    static_cast<std::size_t>(ROCMFP4_SCALE_MAX) + 1u;
+
 /**
  * @brief Test whether a scale byte is a valid ROCmFP4 scale.
  * @param[in] e Scale byte in any of 256 possible values.

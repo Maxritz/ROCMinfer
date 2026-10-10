@@ -206,6 +206,64 @@ Rules:
 - Record durable findings (measured numbers, blockers, decisions) in repo files.
   Do not rely on conversation memory surviving compaction.
 
+## Build configuration (Windows host)
+
+Configure the HIP build with ROCm LLVM clang as **both** the C++ and HIP compiler.
+CMake's `Windows-Clang-HIP` platform module requires both languages to share the
+Clang ABI, so mixing MSVC C++ with HIP fails configure.
+
+```bat
+cmake -S . -B build-hip -G Ninja ^
+  -DROCMINFER_ENABLE_HIP=ON ^
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
+  -DCMAKE_HIP_ARCHITECTURES=gfx1201 ^
+  -DCMAKE_PREFIX_PATH="G:/ROCM10RT-gfx1201" ^
+  -DCMAKE_CXX_COMPILER="G:/ROCM10RT-gfx1201/lib/llvm/bin/clang++.exe"
+cmake --build build-hip --config RelWithDebInfo
+```
+
+- ROCm 7.16.26331 lives at `G:\ROCM10RT-gfx1201`.
+- The ROCm clang binary is `G:\...\lib\llvm\bin\clang++.exe` (not `llvm/bin`).
+- `hipcc.bat` exists but CMake's HIP support does **not** accept it as
+  `CMAKE_HIP_COMPILER`; use clang++ directly.
+- A Doxygen file is checked in at `docs/Doxyfile` with `WARN_AS_ERROR=YES`.
+  Run `doxygen docs/Doxyfile` to validate documentation.
+
+## Phase status
+
+- Phase 0: complete (pinning, profiler, build).
+- Phase 1: complete (GGUF reader, ROCmFPX registry, CPU reference, goldens).
+- Phase 2: complete (fused dequantize-and-dot kernel, bit-identical exact family,
+  FP32-bound numerical family, real-GPU run on gfx1201, cross-compiled for
+  gfx1031).
+- Phase 3: model-zoo metadata + CLI tooling (`inspect`, `validate`, `info`,
+  `bench`); complete.
+- Phase 4: graph execution / scheduler / residency / MoE streaming; **complete**
+  (Model/GpuBuffer residency layer, fused dequantize-and-dot matvec, end-to-end
+  GPU matvec verified vs CPU oracle).
+- Phase 5: RDNA4 WMMA acceleration — **implemented** (`src/kernels/matmul_wmma.hip`,
+  `src/kernels/rocmfp4_wmma_dot.hip`, `include/rocminfer/{matmul_wmma,rocmfp4_wmma_dot}.hpp`);
+  ROCmFP4→f16 dequantize-and-WMMA tile bit-exact vs CPU oracle on gfx1201,
+  1.484 µs (plain matmul tile) and 1.527 µs (ROCmFP4+WMMA tile) per launch (RUN-006 re-measurement; supersedes earlier ~1.3/~2.0 µs figures).
+  rocWMMA C++ API emits real `v_wmma_f32_16x16x16_f16` hardware instruction.
+- Phase 5b: int4×int4 integer matmul — **implemented and verified on gfx1201**
+  (`src/kernels/int4_wmma.hip`, `src/kernels/int4_matvec.hip`,
+  `include/rocminfer/{int4_wmma,int4_matvec}.hpp`, `Model::matvec_int4x` dispatch).
+  gfx1201 emits the raw `__builtin_amdgcn_wmma_i32_16x16x16_iu4_w32_gfx12`
+  builtin → `v_wmma_i32_16x16x16_iu4` (rocWMMA has no sub-byte path); gfx1031
+  emits paired `v_dot8_i32_i4`. 16/16 CTest green on RX 9070 XT; bench
+  (rows=64 cols=512, median of 5, RUN-008): rocFP4 2.090 µs, int4_dot scalar
+  1.336 µs, int4_matvec 1.454 µs. Those supersede the cold-clock 4.592/4.690 µs
+  figures recorded in RUN-007(b).
+- Phase 6: architecture coverage (multi-family quant, KV-cache quant, vision,
+  MoE); **researched, not yet started**. The intended data model for the KV-quant
+  part is written down in `docs/PHASE6_KV_QUANT_DATA_MODEL.md` (three distinct
+  KV formats, the cross-layer ownership map, the residency truth table, and what
+  is explicitly out of scope). DeepSeek-V4.1-Flash `2cba9e42` (MIT) is pinned in
+  `THIRD_PARTY_SOURCES.md` as the spec source, with the FP4 nibble order recorded
+  as an unresolved blocker that prevents any registry row or golden being
+  written. §6's sanitizer/fuzz and §5 items 5/6 are closed; see RUN-010.
+
 ## 10. Evaluated and not adopted
 
 Recorded so these are not re-proposed each session. Re-open only if the stated

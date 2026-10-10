@@ -400,6 +400,19 @@ GgufReader::GgufReader() : impl_(std::make_unique<Impl>()) {}
 
 GgufReader::~GgufReader() { close(); }
 
+GgufReader::GgufReader(GgufReader&& other) noexcept : impl_(std::move(other.impl_)) {
+    other.impl_.reset();
+}
+
+GgufReader& GgufReader::operator=(GgufReader&& other) noexcept {
+    if (this != &other) {
+        close();
+        impl_ = std::move(other.impl_);
+        other.impl_.reset();
+    }
+    return *this;
+}
+
 bool GgufReader::is_open() const noexcept { return impl_ != nullptr && impl_->open; }
 
 const GgufFile& GgufReader::manifest() const noexcept { return impl_->file; }

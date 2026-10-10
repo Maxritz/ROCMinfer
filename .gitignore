@@ -24,3 +24,9 @@ _deps/
 # Generated golden data is committed deliberately; scratch is not.
 *.tmp
 *.incomplete-*
+
+# Doxygen output (validated, not committed)
+docs/html/
+docs/latex/
+docs/xml/
+docs/rtf/
