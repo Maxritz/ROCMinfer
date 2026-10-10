@@ -14,9 +14,14 @@
 
 #include "rocminfer/format_registry.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <memory>
+#include <system_error>
 
 namespace rocminfer {
 
@@ -376,6 +381,125 @@ int gguf_validate_tensors(GgufFile& file, std::size_t buffer_size,
         }
     }
 
+    return 0;
+}
+
+/// Upper bound on bytes read to parse the manifest. The dominant consumer is the
+/// tokenizer metadata array, which can be tens of megabytes for a large
+/// vocabulary; 512 MiB leaves ample headroom without loading any tensor payload.
+constexpr std::size_t kManifestProbeBytes = 512u * 1024u * 1024u;
+
+struct GgufReader::Impl {
+    std::ifstream stream;          ///< Positioned on demand for tensor reads.
+    GgufFile file;                 ///< Parsed manifest.
+    std::uint64_t total_bytes = 0; ///< True file size from the filesystem.
+    bool open = false;             ///< True when the handle is usable.
+};
+
+GgufReader::GgufReader() : impl_(std::make_unique<Impl>()) {}
+
+GgufReader::~GgufReader() { close(); }
+
+bool GgufReader::is_open() const noexcept { return impl_ != nullptr && impl_->open; }
+
+const GgufFile& GgufReader::manifest() const noexcept { return impl_->file; }
+
+GgufFile& GgufReader::manifest_mutable() noexcept { return impl_->file; }
+
+std::uint64_t GgufReader::file_size() const noexcept { return impl_ ? impl_->total_bytes : 0; }
+
+void GgufReader::close() noexcept {
+    if (impl_) {
+        if (impl_->stream.is_open()) {
+            impl_->stream.close();
+        }
+        impl_->open = false;
+        impl_->total_bytes = 0;
+        impl_->file = GgufFile{};
+    }
+}
+
+int GgufReader::open(const char* path) {
+    if (path == nullptr) {
+        return EINVAL;
+    }
+    if (impl_ && impl_->open) {
+        return EBUSY;
+    }
+
+    // Get the true size from the filesystem; seeftell is 32-bit on Windows.
+    std::error_code ec;
+    const std::uintmax_t total = std::filesystem::file_size(std::filesystem::path(path), ec);
+    if (ec || total == 0) {
+        return ENOENT;
+    }
+
+    auto fresh = std::make_unique<Impl>();
+    fresh->stream.open(path, std::ios::binary);
+    if (!fresh->stream.is_open()) {
+        return ENOENT;
+    }
+
+    // Read only the manifest prefix.
+    const std::size_t want =
+        static_cast<std::size_t>(std::min<std::uintmax_t>(total, kManifestProbeBytes));
+    std::vector<std::uint8_t> prefix(want);
+    fresh->stream.read(reinterpret_cast<char*>(prefix.data()),
+                       static_cast<std::streamsize>(want));
+    if (static_cast<std::size_t>(fresh->stream.gcount()) != want) {
+        return EIO;
+    }
+    fresh->stream.clear();
+    fresh->stream.seekg(0, std::ios::beg);
+
+    const int status = gguf_parse(&fresh->file, prefix.data(), prefix.size());
+    if (status != 0) {
+        return status;
+    }
+
+    fresh->total_bytes = static_cast<std::uint64_t>(total);
+    fresh->open = true;
+    impl_ = std::move(fresh);
+    return 0;
+}
+
+const GgufTensorInfo* GgufReader::find_tensor(std::string_view name) const noexcept {
+    for (const GgufTensorInfo& info : impl_->file.tensors) {
+        if (name == info.name) {
+            return &info;
+        }
+    }
+    return nullptr;
+}
+
+int GgufReader::read_tensor(const GgufTensorInfo& info,
+                            std::vector<std::uint8_t>* out) const {
+    if (out == nullptr || !is_open()) {
+        return EINVAL;
+    }
+    out->clear();
+
+    if (info.byte_size == 0 || info.byte_size > impl_->total_bytes) {
+        return ERANGE;
+    }
+    // data_offset + offset + byte_size must not overflow or exceed the file.
+    if (info.offset > impl_->total_bytes - impl_->file.data_offset) {
+        return ERANGE;
+    }
+    const std::uint64_t start = impl_->file.data_offset + info.offset;
+    if (info.byte_size > impl_->total_bytes - start) {
+        return ERANGE;
+    }
+
+    out->resize(static_cast<std::size_t>(info.byte_size));
+    impl_->stream.clear();
+    impl_->stream.seekg(static_cast<std::streamoff>(start), std::ios::beg);
+    impl_->stream.read(reinterpret_cast<char*>(out->data()),
+                       static_cast<std::streamsize>(info.byte_size));
+    if (static_cast<std::size_t>(impl_->stream.gcount()) != out->size()) {
+        out->clear();
+        return EIO;
+    }
     return 0;
 }
 

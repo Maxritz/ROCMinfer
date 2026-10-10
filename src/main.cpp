@@ -13,13 +13,16 @@
 #include "rocminfer/format_registry.hpp"
 #include "rocminfer/gguf_reader.hpp"
 #include "rocminfer/profiler.hpp"
+#include "rocminfer/rocmfp4_reference.hpp"
+#include "rocminfer/sha256.hpp"
 
-#include <cerrno>
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
@@ -59,6 +62,8 @@ void print_usage(std::ostream& os, std::string_view program) {
        << "  floor                     Measure and print the tracing instrumentation floor.\n"
        << "  inspect <file.gguf>       Print the GGUF manifest: architecture, tensor table, formats.\n"
        << "  validate <file.gguf>      Parse the manifest and verify every tensor fits in the file.\n"
+       << "  decode <file.gguf> [name] Decode one ROCmFP4 tensor; print stats and a SHA-256 golden.\n"
+       << "  digest <file.gguf>        Print the SHA-256 of the whole artifact, for pinning.\n"
        << "\n"
        << "Global options:\n"
        << "  --profileperf[=table|json|off]\n"
@@ -234,6 +239,123 @@ void print_manifest(const rocminfer::GgufFile& file, std::ostream& os) {
     }
 }
 
+/// Print the SHA-256 of an entire file's bytes.
+void print_file_digest(const char* path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        std::cerr << "rocminfer: cannot open '" << path << "' for digest\n";
+        return;
+    }
+    rocminfer::Sha256 hash;
+    std::vector<char> chunk(1u << 20);
+    while (stream) {
+        stream.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        const std::streamsize got = stream.gcount();
+        if (got > 0) {
+            hash.update(chunk.data(), static_cast<std::size_t>(got));
+        }
+    }
+    std::cout << "sha256 " << path << "\n" << hash.hex_digest() << "\n";
+}
+
+/// Decode one ROCmFP4 tensor and report statistics plus a payload digest.
+int decode_tensor(const char* path, const std::string& tensor_name) {
+    rocminfer::GgufReader reader;
+    const int open_status = reader.open(path);
+    if (open_status != 0) {
+        std::cerr << "rocminfer: cannot open '" << path << "': " << status_text(open_status)
+                  << "\n";
+        return kExitError;
+    }
+
+    int status = rocminfer::gguf_validate_tensors(reader.manifest_mutable(), 0, reader.file_size());
+    if (status != 0) {
+        std::cerr << "rocminfer: tensor bounds invalid: " << status_text(status) << "\n";
+        return kExitError;
+    }
+
+    const rocminfer::GgufTensorInfo* info = nullptr;
+    const rocminfer::FormatInfo* format = nullptr;
+    if (tensor_name.empty()) {
+        for (const rocminfer::GgufTensorInfo& candidate : reader.manifest().tensors) {
+            if (const rocminfer::FormatInfo* f =
+                    rocminfer::format_by_ggml_type(candidate.type_id)) {
+                info = &candidate;
+                format = f;
+                break;
+            }
+        }
+        if (info == nullptr) {
+            std::cerr << "rocminfer: no ROCmFP4 tensor found in '" << path << "'\n";
+            return kExitError;
+        }
+    } else {
+        info = reader.find_tensor(tensor_name);
+        if (info == nullptr) {
+            std::cerr << "rocminfer: no tensor named '" << tensor_name << "'\n";
+            return kExitError;
+        }
+        format = rocminfer::format_by_ggml_type(info->type_id);
+        if (format == nullptr) {
+            std::cerr << "rocminfer: tensor '" << tensor_name
+                      << "' is not a registered ROCmFPX format (type "
+                      << info->type_id << ")\n";
+            return kExitError;
+        }
+    }
+
+    std::vector<std::uint8_t> payload;
+    status = reader.read_tensor(*info, &payload);
+    if (status != 0) {
+        std::cerr << "rocminfer: cannot read tensor payload: " << status_text(status) << "\n";
+        return kExitError;
+    }
+
+    std::cout << "tensor: " << info->name << "\n"
+              << "  format: " << format->name << " (" << format->block_bytes
+              << " B/block, " << format->bits_per_weight << " bpw, dual_scale="
+              << (format->dual_scale ? "yes" : "no") << ")\n"
+              << "  dims:";
+    for (std::uint64_t dim : info->dimensions) {
+        std::cout << " " << dim;
+    }
+    std::cout << "\n  payload bytes: " << payload.size() << "\n"
+              << "  payload sha256: " << rocminfer::Sha256::hex(payload.data(), payload.size())
+              << "\n";
+
+    // Decode a bounded prefix for statistics.
+    const std::size_t block_bytes = format->block_bytes;
+    const std::size_t blocks = std::min<std::size_t>(payload.size() / block_bytes, 1u << 20);
+    if (blocks == 0) {
+        std::cerr << "rocminfer: tensor smaller than one block\n";
+        return kExitError;
+    }
+    std::vector<float> out(blocks * rocminfer::QK_ROCMFP4, 0.0f);
+    status = rocminfer::rocmfp4_dequantize_row(out.data(), payload.data(),
+                                               blocks * block_bytes,
+                                               blocks * rocminfer::QK_ROCMFP4,
+                                               format->dual_scale);
+    if (status != 0) {
+        std::cerr << "rocminfer: decode failed: " << status_text(status) << "\n";
+        return kExitError;
+    }
+
+    float minimum = out[0];
+    float maximum = out[0];
+    double sum = 0.0;
+    for (float value : out) {
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
+        sum += value;
+    }
+    std::cout << "  decoded " << (blocks * rocminfer::QK_ROCMFP4) << " weights from "
+              << blocks << " blocks\n"
+              << "    min: " << minimum << "\n"
+              << "    max: " << maximum << "\n"
+              << "    mean: " << (sum / static_cast<double>(out.size())) << "\n";
+    return kExitOk;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -245,6 +367,7 @@ int main(int argc, char** argv) {
     bool want_version = false;
     std::string command;
     std::string positional;
+    std::string extra;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -283,6 +406,8 @@ int main(int argc, char** argv) {
             command = std::string(arg);
         } else if (positional.empty()) {
             positional = std::string(arg);
+        } else if (extra.empty()) {
+            extra = std::string(arg);
         } else {
             std::cerr << "rocminfer: unexpected extra argument '" << arg << "'\n";
             return kExitUsage;
@@ -314,6 +439,47 @@ int main(int argc, char** argv) {
         floor_recorder.measure_floor();
         floor_recorder.report(std::cout);
         return kExitOk;
+    }
+
+    if (command == "digest") {
+        if (positional.empty()) {
+            std::cerr << "rocminfer: digest requires a .gguf path\n";
+            return kExitUsage;
+        }
+        rocminfer::TraceScope scope(recorder, "artifact-digest",
+                                    rocminfer::TraceDomain::kHost);
+        print_file_digest(positional.c_str());
+        if (recorder.enabled()) {
+            recorder.measure_floor();
+            if (recorder.report_mode() == rocminfer::TraceReport::kJson) {
+                recorder.report_json(std::cout);
+            } else {
+                recorder.report(std::cout);
+            }
+        }
+        return kExitOk;
+    }
+
+    if (command == "decode") {
+        if (positional.empty()) {
+            std::cerr << "rocminfer: decode requires a .gguf path\n";
+            return kExitUsage;
+        }
+        // The second positional (already captured) names an optional tensor.
+        const int decode_status = [&]() {
+            rocminfer::TraceScope scope(recorder, "tensor-decode",
+                                        rocminfer::TraceDomain::kHost);
+            return decode_tensor(positional.c_str(), extra);
+        }();
+        if (recorder.enabled()) {
+            recorder.measure_floor();
+            if (recorder.report_mode() == rocminfer::TraceReport::kJson) {
+                recorder.report_json(std::cout);
+            } else {
+                recorder.report(std::cout);
+            }
+        }
+        return decode_status;
     }
 
     if (command == "inspect" || command == "validate") {

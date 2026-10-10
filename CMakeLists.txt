@@ -46,7 +46,8 @@ add_library(rocminfer_core STATIC
     src/profiler_device_null.cpp
     src/format_registry.cpp
     src/rocmfp4_reference.cpp
-    src/gguf_reader.cpp)
+    src/gguf_reader.cpp
+    src/sha256.cpp)
 
 target_include_directories(rocminfer_core
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -78,3 +79,12 @@ add_test(NAME rocmfp4_reference COMMAND rocminfer_format_tests)
 add_executable(rocminfer_gguf_tests tests/test_gguf.cpp)
 target_link_libraries(rocminfer_gguf_tests PRIVATE rocminfer_core)
 add_test(NAME gguf_reader COMMAND rocminfer_gguf_tests)
+
+add_executable(rocminfer_sha256_tests tests/test_sha256.cpp)
+target_link_libraries(rocminfer_sha256_tests PRIVATE rocminfer_core)
+add_test(NAME sha256 COMMAND rocminfer_sha256_tests)
+
+# Requires real ROCmFPX/ROCmFP4 model files; skips cleanly when they are absent.
+add_executable(rocminfer_payload_tests tests/test_rocmfp4_payload.cpp)
+target_link_libraries(rocminfer_payload_tests PRIVATE rocminfer_core)
+add_test(NAME rocmfp4_payload COMMAND rocminfer_payload_tests)

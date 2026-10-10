@@ -19,6 +19,7 @@
 #define ROCMINFER_GGUF_READER_HPP
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -144,6 +145,106 @@ int gguf_parse(GgufFile* out, const void* data, std::size_t size) noexcept;
  */
 int gguf_validate_tensors(GgufFile& file, std::size_t buffer_size,
                           std::uint64_t file_size) noexcept;
+
+/**
+ * @brief On-disk GGUF file opened for random-access tensor payload reads.
+ *
+ * Owns a file handle and the parsed manifest. Lets a caller decode a single
+ * tensor without mapping the multi-gigabyte payload section, which is the whole
+ * point: validating a 3 GB model must not require 3 GB of host memory.
+ *
+ * @note Non-copyable: it owns an operating-system handle. Use one instance per
+ *       file and `close()` or let it destruct.
+ * @warning Not thread-safe for concurrent `open`/`close`. `read_tensor` on a
+ *          distinct reader instance per thread is safe; concurrent reads through
+ *          one instance require external serialisation of the handle.
+ */
+class GgufReader {
+public:
+    /**
+     * @brief Construct in the closed state.
+     */
+    GgufReader();
+
+    /**
+     * @brief Close the handle if open.
+     */
+    ~GgufReader();
+
+    GgufReader(const GgufReader&) = delete;
+    GgufReader& operator=(const GgufReader&) = delete;
+
+    /**
+     * @brief Open and parse a GGUF file from disk.
+     * @param[in] path NUL-terminated path to the file, non-NULL.
+     * @return 0 on success; EINVAL for a null path; EBUSY if already open;
+     *         ENOENT if the file cannot be opened; ERANGE if the manifest is
+     *         malformed or the declared file is too short.
+     * @post On success `manifest()` and `file_size()` are populated and
+     *       `is_open()` is true.
+     */
+    int open(const char* path);
+
+    /**
+     * @brief Close the file and release the handle and manifest.
+     * @post Safe to call when already closed.
+     */
+    void close() noexcept;
+
+    /**
+     * @brief Report whether the reader holds an open file.
+     * @return true when a file is open.
+     */
+    bool is_open() const noexcept;
+
+    /**
+     * @brief Access the parsed manifest as a mutable reference for validation.
+     * @return Reference to the parsed manifest; empty when closed.
+     * @pre `is_open()` is true.
+     * @warning This exists so `gguf_validate_tensors`, which fills in
+     *          `byte_size`, can run on an open reader's manifest. Treat the
+     *          result as read-mostly; do not reorder tensors or edit metadata.
+     */
+    GgufFile& manifest_mutable() noexcept;
+
+    /**
+     * @brief Access the parsed manifest.
+     * @return Reference to the parsed manifest; empty when closed.
+     * @pre `is_open()` is true.
+     */
+    const GgufFile& manifest() const noexcept;
+
+    /**
+     * @brief Total size of the open file in bytes.
+     * @return File size, or 0 when closed.
+     */
+    std::uint64_t file_size() const noexcept;
+
+    /**
+     * @brief Read one tensor's payload bytes into `out`.
+     * @param[in]  info Tensor whose `offset` and `byte_size` were computed by
+     *                   `gguf_validate_tensors`, non-NULL.
+     * @param[out] out   Receives exactly `info.byte_size` bytes on success.
+     * @return 0 on success; EINVAL for null arguments or an already-closed
+     *         reader; ERANGE when the tensor extent is invalid or lies beyond
+     *         the file.
+     * @pre `info.byte_size` is non-zero and `info.offset + info.byte_size` does
+     *      not overflow past `file_size()`.
+     * @post On failure `out` is left cleared and unmodified.
+     */
+    int read_tensor(const GgufTensorInfo& info, std::vector<std::uint8_t>* out) const;
+
+    /**
+     * @brief Find a tensor by exact name.
+     * @param[in] name Tensor name to match, e.g. "blk.0.attn_q.weight".
+     * @return Pointer to the manifest entry, or nullptr when absent.
+     */
+    const GgufTensorInfo* find_tensor(std::string_view name) const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 }  // namespace rocminfer
 
