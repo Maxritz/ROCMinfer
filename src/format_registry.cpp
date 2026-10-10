@@ -29,9 +29,11 @@ constexpr float bits_per_weight(std::uint32_t block_bytes, std::uint32_t element
 
 /// Registry order defines the enumeration order of `format_at`.
 constexpr std::array<FormatInfo, 2> kRegistry = {{
-    {QuantFormat::kRocmFP4, "Q4_0_ROCMFP4", "Q4_0_ROCMFP4", 18, kQkRocmFP4,
+    {QuantFormat::kRocmFP4, "Q4_0_ROCMFP4", "Q4_0_ROCMFP4",
+     static_cast<std::uint32_t>(GgmlType::kQ4_0RocmFP4), 18, kQkRocmFP4,
      bits_per_weight(18, kQkRocmFP4), true},
-    {QuantFormat::kRocmFP4Fast, "Q4_0_ROCMFP4_FAST", "Q4_0_ROCMFP4_FAST", 17, kQkRocmFP4,
+    {QuantFormat::kRocmFP4Fast, "Q4_0_ROCMFP4_FAST", "Q4_0_ROCMFP4_FAST",
+     static_cast<std::uint32_t>(GgmlType::kQ4_0RocmFP4Fast), 17, kQkRocmFP4,
      bits_per_weight(17, kQkRocmFP4), false},
 }};
 
@@ -59,6 +61,15 @@ std::size_t format_registry_size() noexcept { return kRegistry.size(); }
 
 const FormatInfo* format_at(std::size_t index) noexcept {
     return index < kRegistry.size() ? &kRegistry[index] : nullptr;
+}
+
+const FormatInfo* format_by_ggml_type(std::uint32_t type) noexcept {
+    for (const FormatInfo& entry : kRegistry) {
+        if (entry.ggml_type_id == type) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 std::size_t format_row_bytes(const FormatInfo& info, std::size_t elements) noexcept {

@@ -3,40 +3,71 @@
  * @brief Command-line front end for ROCMinfer.
  *
  * Parses the global switches, configures the trace recorder, and dispatches to
- * the requested subcommand. Inference subcommands are registered by later phases;
- * `--profile-floor` and `--help` are functional now.
+ * the requested subcommand. `floor`, `inspect`, and `validate` are functional
+ * now; inference subcommands are registered by later phases.
  *
  * @note This is the only translation unit permitted to throw to the terminal.
  *       Everything else reports failures through status codes.
  */
 
+#include "rocminfer/format_registry.hpp"
+#include "rocminfer/gguf_reader.hpp"
 #include "rocminfer/profiler.hpp"
 
+#include <cerrno>
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <map>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <vector>
+
+// We use the portable C file and error APIs deliberately so one source builds
+// under both the MSVC-ABI clang toolchain and MinGW; the *_s variants are not
+// available on every target.
+#if defined(_MSC_VER)
+#define ROCMINFER_DISABLE_CRT_WARNINGS_BEGIN \
+    _Pragma("warning(push)") _Pragma("warning(disable : 4996)")
+#define ROCMINFER_DISABLE_CRT_WARNINGS_END _Pragma("warning(pop)")
+#else
+#define ROCMINFER_DISABLE_CRT_WARNINGS_BEGIN
+#define ROCMINFER_DISABLE_CRT_WARNINGS_END
+#endif
 
 namespace {
 
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
+constexpr int kExitError = 1;
+
+/// Human-readable description of an errno value, portable across toolchains.
+std::string status_text(int status) {
+    ROCMINFER_DISABLE_CRT_WARNINGS_BEGIN
+    return std::string(std::strerror(status));
+    ROCMINFER_DISABLE_CRT_WARNINGS_END
+}
 
 void print_usage(std::ostream& os, std::string_view program) {
-    os << "usage: " << program << " [options] [command]\n"
+    os << "usage: " << program << " [options] [command] [args]\n"
        << "\n"
        << "Commands:\n"
-       << "  floor           Measure and print the tracing instrumentation floor.\n"
+       << "  floor                     Measure and print the tracing instrumentation floor.\n"
+       << "  inspect <file.gguf>       Print the GGUF manifest: architecture, tensor table, formats.\n"
+       << "  validate <file.gguf>      Parse the manifest and verify every tensor fits in the file.\n"
        << "\n"
        << "Global options:\n"
        << "  --profileperf[=table|json|off]\n"
-       << "                 Record per-component timings and print a report at exit.\n"
-       << "                 'table' (default) is human-readable; 'json' is machine-readable.\n"
-       << "                 Tracing is disabled unless this switch is given.\n"
-       << "  --profile-floor Measure the instrumentation floor and exit.\n"
-       << "  -h, --help      Show this message.\n"
-       << "  --version       Show the engine version.\n";
+       << "                           Record per-component timings and print a report at exit.\n"
+       << "                           'table' (default) is human-readable; 'json' is machine-readable.\n"
+       << "                           Tracing is disabled unless this switch is given.\n"
+       << "  --profile-floor          Measure the instrumentation floor and exit.\n"
+       << "  -h, --help               Show this message.\n"
+       << "  --version                Show the engine version.\n";
 }
 
 /**
@@ -81,6 +112,128 @@ bool parse_profileperf(std::string_view argument, rocminfer::TraceReport* out_mo
     return false;
 }
 
+/**
+ * @brief Read a bounded prefix of a file into memory.
+ * @param[in]  path        Path to read, non-NULL and NUL-terminated.
+ * @param[out] out_bytes   Receives the leading bytes of the file.
+ * @param[out] out_total   Receives the true total file size in bytes.
+ * @param[in]  max_bytes   Upper bound on bytes to read into memory.
+ * @return true on success; false if the file is missing, empty, or unreadable.
+ * @pre `out_bytes` and `out_total` are non-NULL; `max_bytes >= 1`.
+ * @post On success `out_bytes->size()` equals `min(file size, max_bytes)` and
+ *       `*out_total` is the true file size, which may exceed the buffer.
+ * @note Only the manifest is needed for `inspect` and `validate`, so this reads
+ *       a prefix rather than a multi-gigabyte payload. Sizes come from the
+ *       filesystem, which is 64-bit on Windows; `ftell` would truncate at 2 GiB.
+ * @warning A file whose manifest exceeds `max_bytes` will fail to parse with
+ *          ERANGE. That is reported, never silently truncated.
+ */
+bool read_file_prefix(const char* path, std::vector<std::uint8_t>* out_bytes,
+                      std::uint64_t* out_total, std::size_t max_bytes) {
+    std::error_code ec;
+    const std::filesystem::path fs_path(path);
+    const std::uintmax_t total = std::filesystem::file_size(fs_path, ec);
+    if (ec || total == 0) {
+        return false;
+    }
+
+    ROCMINFER_DISABLE_CRT_WARNINGS_BEGIN
+    std::FILE* file = std::fopen(path, "rb");
+    ROCMINFER_DISABLE_CRT_WARNINGS_END
+    if (file == nullptr) {
+        return false;
+    }
+
+    const std::size_t want =
+        static_cast<std::size_t>(std::min<std::uintmax_t>(total, max_bytes));
+    out_bytes->resize(want);
+    const std::size_t read = std::fread(out_bytes->data(), 1, want, file);
+    std::fclose(file);
+
+    if (read != want) {
+        out_bytes->clear();
+        return false;
+    }
+    *out_total = static_cast<std::uint64_t>(total);
+    return true;
+}
+
+/// Human-readable name for a `ggml_type` id from the file.
+std::string describe_type(std::uint32_t type_id) {
+    if (const rocminfer::FormatInfo* info = rocminfer::format_by_ggml_type(type_id)) {
+        return info->name;
+    }
+    switch (static_cast<rocminfer::GgmlType>(type_id)) {
+        case rocminfer::GgmlType::kF32:  return "F32";
+        case rocminfer::GgmlType::kF16:  return "F16";
+        case rocminfer::GgmlType::kQ4_0: return "Q4_0";
+        default: break;
+    }
+    return "type_" + std::to_string(type_id);
+}
+
+/// Count tensors per format and per raw type id for the summary.
+struct TypeSummary {
+    std::map<std::string, std::uint64_t> counts;  ///< format/type name -> tensor count
+    std::map<std::uint32_t, std::uint64_t> raw;   ///< raw type id -> tensor count
+};
+
+/**
+ * @brief Print a GGUF manifest: header, metadata, and per-format tensor census.
+ * @param[in] file Parsed manifest.
+ * @param[in] os   Destination stream.
+ */
+void print_manifest(const rocminfer::GgufFile& file, std::ostream& os) {
+    os << "GGUF v" << file.version << "  tensors=" << file.tensor_count
+       << "  metadata=" << file.metadata_kv_count << "\n";
+    os << "data section offset = " << file.data_offset << "\n\n";
+
+    os << "metadata:\n";
+    for (const auto& entry : file.metadata) {
+        const rocminfer::GgufMetadataValue& value = entry.second;
+        if (value.type == rocminfer::GgufValueType::kString) {
+            os << "  " << entry.first << " = \"" << value.string_value << "\"\n";
+        } else if (value.type == rocminfer::GgufValueType::kArray) {
+            os << "  " << entry.first << " = ["
+               << rocminfer::gguf_value_type_size(value.array_element_type) << "-byte x "
+               << value.array_length << "]\n";
+        } else if (value.type == rocminfer::GgufValueType::kBool) {
+            os << "  " << entry.first << " = " << (value.bool_value ? "true" : "false") << "\n";
+        } else {
+            os << "  " << entry.first << " = " << value.numeric_value << "\n";
+        }
+    }
+
+    TypeSummary summary;
+    for (const rocminfer::GgufTensorInfo& tensor : file.tensors) {
+        summary.counts[describe_type(tensor.type_id)] += 1;
+        summary.raw[tensor.type_id] += 1;
+    }
+
+    os << "\ntensor types:\n";
+    for (const auto& entry : summary.counts) {
+        os << "  " << entry.first << ": " << entry.second << "\n";
+    }
+
+    // Flag which of the present types this engine can actually decode.
+    os << "\ndecode support:\n";
+    bool any_supported = false;
+    for (std::size_t i = 0; i < rocminfer::format_registry_size(); ++i) {
+        const rocminfer::FormatInfo* info = rocminfer::format_at(i);
+        const auto it = summary.raw.find(info->ggml_type_id);
+        if (it != summary.raw.end() && it->second > 0) {
+            any_supported = true;
+            os << "  " << info->name << ": " << it->second
+               << " tensors (dual_scale=" << (info->dual_scale ? "yes" : "no")
+               << ", " << info->block_bytes << " B/block, " << info->bits_per_weight
+               << " bpw)\n";
+        }
+    }
+    if (!any_supported) {
+        os << "  none of the tensor types present are registered for decode\n";
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -91,6 +244,7 @@ int main(int argc, char** argv) {
     bool want_help = false;
     bool want_version = false;
     std::string command;
+    std::string positional;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -125,11 +279,14 @@ int main(int argc, char** argv) {
             std::cerr << "rocminfer: unknown option '" << arg << "'\n";
             return kExitUsage;
         }
-        if (!command.empty()) {
+        if (command.empty()) {
+            command = std::string(arg);
+        } else if (positional.empty()) {
+            positional = std::string(arg);
+        } else {
             std::cerr << "rocminfer: unexpected extra argument '" << arg << "'\n";
             return kExitUsage;
         }
-        command = std::string(arg);
     }
 
     if (want_help) {
@@ -156,6 +313,83 @@ int main(int argc, char** argv) {
         rocminfer::TraceRecorder floor_recorder(floor_config);
         floor_recorder.measure_floor();
         floor_recorder.report(std::cout);
+        return kExitOk;
+    }
+
+    if (command == "inspect" || command == "validate") {
+        if (positional.empty()) {
+            std::cerr << "rocminfer: " << command << " requires a .gguf path\n";
+            return kExitUsage;
+        }
+
+        // Only the manifest is read for inspect/validate. The dominant consumer is the
+// tokenizer metadata array, which can run to tens of megabytes for a large
+// vocabulary; 512 MiB leaves ample headroom without reading multi-GB payloads.
+constexpr std::size_t kManifestProbeBytes = 512u * 1024u * 1024u;
+
+    std::vector<std::uint8_t> bytes;
+        std::uint64_t file_size = 0;
+        {
+            rocminfer::TraceScope scope(recorder, "manifest-read",
+                                        rocminfer::TraceDomain::kAlloc);
+            if (!read_file_prefix(positional.c_str(), &bytes, &file_size,
+                                  kManifestProbeBytes)) {
+                std::cerr << "rocminfer: cannot read '" << positional << "'\n";
+                return kExitError;
+            }
+        }
+        if (bytes.size() < file_size) {
+            std::cerr << "rocminfer: note: read " << bytes.size() << " of " << file_size
+                      << " bytes (manifest prefix only)\n";
+        }
+
+        rocminfer::GgufFile file;
+        int status = 0;
+        {
+            rocminfer::TraceScope scope(recorder, "manifest-parse",
+                                        rocminfer::TraceDomain::kHost);
+            status = rocminfer::gguf_parse(&file, bytes.data(), bytes.size());
+        }
+        if (status != 0) {
+            std::cerr << "rocminfer: cannot parse '" << positional << "' ("
+                      << status_text(status) << ")\n";
+            return kExitError;
+        }
+
+        if (command == "validate") {
+            {
+                rocminfer::TraceScope scope(recorder, "manifest-validate",
+                                            rocminfer::TraceDomain::kHost);
+                status = rocminfer::gguf_validate_tensors(file, bytes.size(), file_size);
+            }
+            if (status != 0) {
+                std::cerr << "rocminfer: '" << positional << "' failed validation: "
+                          << status_text(status) << "\n";
+                return kExitError;
+            }
+            std::cout << positional << ": manifest valid, " << file.tensor_count
+                      << " tensors, data at offset " << file.data_offset << "\n";
+        } else {
+            {
+                rocminfer::TraceScope scope(recorder, "manifest-validate",
+                                            rocminfer::TraceDomain::kHost);
+                status = rocminfer::gguf_validate_tensors(file, bytes.size(), file_size);
+            }
+            print_manifest(file, std::cout);
+            if (status != 0) {
+                std::cout << "\nWARNING: tensor bounds check failed ("
+                          << status_text(status) << ")\n";
+            }
+        }
+
+        if (recorder.enabled()) {
+            recorder.measure_floor();
+            if (recorder.report_mode() == rocminfer::TraceReport::kJson) {
+                recorder.report_json(std::cout);
+            } else {
+                recorder.report(std::cout);
+            }
+        }
         return kExitOk;
     }
 

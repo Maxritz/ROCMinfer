@@ -35,6 +35,20 @@ enum class QuantFormat : std::uint8_t {
 };
 
 /**
+ * @brief GGML type identifier, as stored in GGUF tensor metadata.
+ *
+ * Values mirror the `ggml_type` enum of the pinned ROCmFPX revision so a file's
+ * on-disk type field maps to a registry entry without a translation table.
+ */
+enum class GgmlType : std::uint32_t {
+    kF32 = 0,
+    kF16 = 1,
+    kQ4_0 = 2,
+    kQ4_0RocmFP4 = 100,      ///< Dual-scale ROCmFP4.
+    kQ4_0RocmFP4Fast = 101,  ///< Single-scale ROCmFP4 FAST.
+};
+
+/**
  * @brief Complete description of one registered format.
  *
  * Every field is a compile-time constant for the lifetime of the process.
@@ -43,6 +57,7 @@ struct FormatInfo {
     QuantFormat id = QuantFormat::kUnknown;   ///< Registry identifier.
     const char* name = "";                    ///< Canonical ROCMinfer name.
     const char* gguf_type = "";               ///< Type string as it appears in GGUF metadata.
+    std::uint32_t ggml_type_id = 0;           ///< Numeric `ggml_type` stored in the file.
     std::uint32_t block_bytes = 0;            ///< Bytes per packed block.
     std::uint32_t block_elements = 0;         ///< Weights represented per block.
     float bits_per_weight = 0.0f;             ///< Nominal BPW including scale overhead.
@@ -79,6 +94,17 @@ std::size_t format_registry_size() noexcept;
  * @pre `index < format_registry_size()`.
  */
 const FormatInfo* format_at(std::size_t index) noexcept;
+
+/**
+ * @brief Resolve a GGML type id from tensor metadata to a registered format.
+ * @param[in] type Type id read verbatim from the file.
+ * @return Pointer to static registry storage, or nullptr when unsupported.
+ * @note Only types with a working reference decoder resolve. F32, F16 and Q4_0
+ *       deliberately return nullptr here: they are readable but not ROCmFPX
+ *       formats, so `validate` reports them as unsupported rather than passing
+ *       them off as something this engine decodes.
+ */
+const FormatInfo* format_by_ggml_type(std::uint32_t type) noexcept;
 
 /**
  * @brief Bytes a packed row occupies for a format.

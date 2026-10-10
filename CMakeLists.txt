@@ -45,7 +45,8 @@ add_library(rocminfer_core STATIC
     src/profiler.cpp
     src/profiler_device_null.cpp
     src/format_registry.cpp
-    src/rocmfp4_reference.cpp)
+    src/rocmfp4_reference.cpp
+    src/gguf_reader.cpp)
 
 target_include_directories(rocminfer_core
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -73,3 +74,7 @@ add_test(NAME profiler COMMAND rocminfer_tests)
 add_executable(rocminfer_format_tests tests/test_rocmfp4.cpp)
 target_link_libraries(rocminfer_format_tests PRIVATE rocminfer_core)
 add_test(NAME rocmfp4_reference COMMAND rocminfer_format_tests)
+
+add_executable(rocminfer_gguf_tests tests/test_gguf.cpp)
+target_link_libraries(rocminfer_gguf_tests PRIVATE rocminfer_core)
+add_test(NAME gguf_reader COMMAND rocminfer_gguf_tests)
