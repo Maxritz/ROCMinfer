@@ -117,52 +117,6 @@ bool parse_profileperf(std::string_view argument, rocminfer::TraceReport* out_mo
     return false;
 }
 
-/**
- * @brief Read a bounded prefix of a file into memory.
- * @param[in]  path        Path to read, non-NULL and NUL-terminated.
- * @param[out] out_bytes   Receives the leading bytes of the file.
- * @param[out] out_total   Receives the true total file size in bytes.
- * @param[in]  max_bytes   Upper bound on bytes to read into memory.
- * @return true on success; false if the file is missing, empty, or unreadable.
- * @pre `out_bytes` and `out_total` are non-NULL; `max_bytes >= 1`.
- * @post On success `out_bytes->size()` equals `min(file size, max_bytes)` and
- *       `*out_total` is the true file size, which may exceed the buffer.
- * @note Only the manifest is needed for `inspect` and `validate`, so this reads
- *       a prefix rather than a multi-gigabyte payload. Sizes come from the
- *       filesystem, which is 64-bit on Windows; `ftell` would truncate at 2 GiB.
- * @warning A file whose manifest exceeds `max_bytes` will fail to parse with
- *          ERANGE. That is reported, never silently truncated.
- */
-bool read_file_prefix(const char* path, std::vector<std::uint8_t>* out_bytes,
-                      std::uint64_t* out_total, std::size_t max_bytes) {
-    std::error_code ec;
-    const std::filesystem::path fs_path(path);
-    const std::uintmax_t total = std::filesystem::file_size(fs_path, ec);
-    if (ec || total == 0) {
-        return false;
-    }
-
-    ROCMINFER_DISABLE_CRT_WARNINGS_BEGIN
-    std::FILE* file = std::fopen(path, "rb");
-    ROCMINFER_DISABLE_CRT_WARNINGS_END
-    if (file == nullptr) {
-        return false;
-    }
-
-    const std::size_t want =
-        static_cast<std::size_t>(std::min<std::uintmax_t>(total, max_bytes));
-    out_bytes->resize(want);
-    const std::size_t read = std::fread(out_bytes->data(), 1, want, file);
-    std::fclose(file);
-
-    if (read != want) {
-        out_bytes->clear();
-        return false;
-    }
-    *out_total = static_cast<std::uint64_t>(total);
-    return true;
-}
-
 /// Human-readable name for a `ggml_type` id from the file.
 std::string describe_type(std::uint32_t type_id) {
     if (const rocminfer::FormatInfo* info = rocminfer::format_by_ggml_type(type_id)) {
@@ -488,33 +442,14 @@ int main(int argc, char** argv) {
             return kExitUsage;
         }
 
-        // Only the manifest is read for inspect/validate. The dominant consumer is the
-// tokenizer metadata array, which can run to tens of megabytes for a large
-// vocabulary; 512 MiB leaves ample headroom without reading multi-GB payloads.
-constexpr std::size_t kManifestProbeBytes = 512u * 1024u * 1024u;
-
-    std::vector<std::uint8_t> bytes;
-        std::uint64_t file_size = 0;
-        {
-            rocminfer::TraceScope scope(recorder, "manifest-read",
-                                        rocminfer::TraceDomain::kAlloc);
-            if (!read_file_prefix(positional.c_str(), &bytes, &file_size,
-                                  kManifestProbeBytes)) {
-                std::cerr << "rocminfer: cannot read '" << positional << "'\n";
-                return kExitError;
-            }
-        }
-        if (bytes.size() < file_size) {
-            std::cerr << "rocminfer: note: read " << bytes.size() << " of " << file_size
-                      << " bytes (manifest prefix only)\n";
-        }
-
-        rocminfer::GgufFile file;
+// inspect and validate share GgufReader with decode, so the manifest
+        // probe size and the file-size handling live in exactly one place.
+        rocminfer::GgufReader reader;
         int status = 0;
         {
-            rocminfer::TraceScope scope(recorder, "manifest-parse",
-                                        rocminfer::TraceDomain::kHost);
-            status = rocminfer::gguf_parse(&file, bytes.data(), bytes.size());
+            rocminfer::TraceScope scope(recorder, "manifest-open",
+                                        rocminfer::TraceDomain::kAlloc);
+            status = reader.open(positional.c_str());
         }
         if (status != 0) {
             std::cerr << "rocminfer: cannot parse '" << positional << "' ("
@@ -522,26 +457,24 @@ constexpr std::size_t kManifestProbeBytes = 512u * 1024u * 1024u;
             return kExitError;
         }
 
+        {
+            rocminfer::TraceScope scope(recorder, "manifest-validate",
+                                        rocminfer::TraceDomain::kHost);
+            status = rocminfer::gguf_validate_tensors(reader.manifest_mutable(), 0,
+                                                      reader.file_size());
+        }
+
         if (command == "validate") {
-            {
-                rocminfer::TraceScope scope(recorder, "manifest-validate",
-                                            rocminfer::TraceDomain::kHost);
-                status = rocminfer::gguf_validate_tensors(file, bytes.size(), file_size);
-            }
             if (status != 0) {
                 std::cerr << "rocminfer: '" << positional << "' failed validation: "
                           << status_text(status) << "\n";
                 return kExitError;
             }
-            std::cout << positional << ": manifest valid, " << file.tensor_count
-                      << " tensors, data at offset " << file.data_offset << "\n";
+            std::cout << positional << ": manifest valid, "
+                      << reader.manifest().tensor_count << " tensors, data at offset "
+                      << reader.manifest().data_offset << "\n";
         } else {
-            {
-                rocminfer::TraceScope scope(recorder, "manifest-validate",
-                                            rocminfer::TraceDomain::kHost);
-                status = rocminfer::gguf_validate_tensors(file, bytes.size(), file_size);
-            }
-            print_manifest(file, std::cout);
+            print_manifest(reader.manifest(), std::cout);
             if (status != 0) {
                 std::cout << "\nWARNING: tensor bounds check failed ("
                           << status_text(status) << ")\n";

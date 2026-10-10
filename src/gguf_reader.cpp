@@ -387,7 +387,7 @@ int gguf_validate_tensors(GgufFile& file, std::size_t buffer_size,
 /// Upper bound on bytes read to parse the manifest. The dominant consumer is the
 /// tokenizer metadata array, which can be tens of megabytes for a large
 /// vocabulary; 512 MiB leaves ample headroom without loading any tensor payload.
-constexpr std::size_t kManifestProbeBytes = 512u * 1024u * 1024u;
+constexpr std::size_t kManifestProbeBytes = GGUF_MANIFEST_PROBE_BYTES;
 
 struct GgufReader::Impl {
     std::ifstream stream;          ///< Positioned on demand for tensor reads.

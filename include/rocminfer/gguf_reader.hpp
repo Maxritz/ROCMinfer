@@ -33,8 +33,18 @@ inline constexpr std::uint32_t GGUF_MAGIC = 0x46554747u;
 inline constexpr std::uint32_t GGUF_VERSION_V2 = 2;
 inline constexpr std::uint32_t GGUF_VERSION_V3 = 3;
 
-/// Default tensor-data alignment in the pinned GGUF revision.
+/// Default GGUF tensor-data alignment in the pinned GGUF revision.
 inline constexpr std::uint64_t GGUF_DEFAULT_ALIGNMENT = 32;
+
+/**
+ * @brief Upper bound on bytes read from a GGUF file to parse its manifest.
+ *
+ * The dominant consumer is the tokenizer metadata array, which reaches tens of
+ * megabytes for a large vocabulary. 512 MiB leaves ample headroom while
+ * keeping a multi-gigabyte payload off the heap. A file whose manifest exceeds
+ * this fails to parse with ERANGE, which is reported rather than truncated.
+ */
+inline constexpr std::size_t GGUF_MANIFEST_PROBE_BYTES = 512u * 1024u * 1024u;
 
 /**
  * @brief Type tag of a GGUF metadata value.

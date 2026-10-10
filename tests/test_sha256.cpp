@@ -11,9 +11,13 @@
 
 #include "rocminfer/sha256.hpp"
 
+#include "rocminfer/detail/sha256_constants.hpp"
+
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -39,6 +43,68 @@ void expect_digest(const std::string& input, const char* expected, int line) {
 }
 
 #define EXPECT_DIGEST(input, expected) expect_digest((input), (expected), __LINE__)
+
+/**
+ * @brief Runtime prime generation, independent of the production derivation.
+ * @param[in] index Zero-based prime index.
+ * @return The `index`-th prime.
+ * @note Deliberately not shared with the production `prime_at`, so a mistake in
+ *       prime selection cannot hide by being wrong in both places at once.
+ */
+std::uint32_t prime_runtime(std::size_t index) {
+    std::vector<std::uint32_t> primes;
+    for (std::uint32_t candidate = 2; primes.size() <= index; ++candidate) {
+        bool is_prime = true;
+        for (std::uint32_t d = 2; d * d <= candidate; ++d) {
+            if (candidate % d == 0) {
+                is_prime = false;
+                break;
+            }
+        }
+        if (is_prime) {
+            primes.push_back(candidate);
+        }
+    }
+    return primes[index];
+}
+
+/**
+ * @brief Independent re-derivation of a SHA-256 round constant.
+ * @param[in] index Round index in 0..63.
+ * @return Fractional 32 bits of cbrt(p_index).
+ * @note Uses floating point, deliberately. The production table is computed
+ *       with exact integer arithmetic; verifying it through a different
+ *       arithmetic path means a shared mistake would have to occur in two
+ *       unrelated implementations to go unnoticed.
+ */
+std::uint32_t round_constant_via_float(std::size_t index) {
+    const long double root = std::pow(static_cast<long double>(prime_runtime(index)),
+                                      1.0L / 3.0L);
+    const long double fraction = root - std::floor(root);
+    return static_cast<std::uint32_t>(fraction * 4294967296.0L);
+}
+
+/**
+ * @brief Independent re-derivation of an initial hash word.
+ * @param[in] index Word index in 0..7.
+ * @return Fractional 32 bits of sqrt(p_index).
+ */
+std::uint32_t state_word_via_float(std::size_t index) {
+    const long double root = std::sqrt(static_cast<long double>(prime_runtime(index)));
+    const long double fraction = root - std::floor(root);
+    return static_cast<std::uint32_t>(fraction * 4294967296.0L);
+}
+
+void test_constants_agree_across_independent_derivations() {
+    for (std::size_t i = 0; i < rocminfer::detail::kSha256RoundCount; ++i) {
+        check(rocminfer::detail::kSha256RoundConstants[i] == round_constant_via_float(i),
+              "round constant mismatch vs floating-point derivation", __LINE__);
+    }
+    for (std::size_t i = 0; i < rocminfer::detail::kSha256StateCount; ++i) {
+        check(rocminfer::detail::kSha256StateWords[i] == state_word_via_float(i),
+              "state word mismatch vs floating-point derivation", __LINE__);
+    }
+}
 
 void test_known_vectors() {
     EXPECT_DIGEST("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
@@ -89,6 +155,7 @@ void test_reset_allows_reuse() {
 }  // namespace
 
 int main() {
+    test_constants_agree_across_independent_derivations();
     test_known_vectors();
     test_streaming_equivalence();
     test_reset_allows_reuse();
