@@ -190,6 +190,16 @@ public:
      * @pre The tensor is resident, `x_int4` holds `cols / 2` packed bytes,
      *      `y` holds `rows` int32 values.
      * @post On success the kernel launch is enqueued on `stream`.
+     * @note This routes through the row-wise `int4_matvec_i32_traced` and not the
+     *       `int4_matvec_iu4_i32` WMMA tile, and that is a measurement rather
+     *       than a preference: on gfx1201 the `v_wmma_i32_16x16x16_iu4` tile
+     *       measured 2.02 us/launch against the row-wise kernel's 1.29 us on the
+     *       64x512 bench, 1.56x slower, with the accumulator held in integer
+     *       registers throughout. The suspected cause is parallelism, not the
+     *       matrix core: one wave owns 16 rows, so at rows=64 the tile path runs
+     *       4 blocks x 32 threads against the row-wise kernel's 64 x 256.
+     *       Revisit the routing if the tile path gains parallelism. Do not switch
+     *       on the assumption that a hardware instruction must be faster.
      * @warning The tensor's nibbles must be genuine two's-complement signed
      *          int4; this entry point performs no per-nibble validation.
      */

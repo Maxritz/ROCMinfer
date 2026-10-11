@@ -493,6 +493,75 @@ Honesty notes attached to those numbers:
 - gfx1031 runtime numbers remain unmeasured (no local gfx1031 part); MACX
   (rr@10.0.0.11, source at `C:\x`) is the intended host.
 
+## [RUN-011] 2026-10-11 — MODE: FULL — IU4-tile broadcast matvec: built, bit-exact, and measured SLOWER than the row-wise path
+
+### WHAT SHIPPED
+`int4_matvec_iu4_i32` (`src/kernels/int4_wmma.hip`, `include/rocminfer/int4_wmma.hpp`)
+computes the broadcast matvec with the RDNA4 `v_wmma_i32_16x16x16_iu4` tile: one
+wave per 16 output rows, the shared activation broadcast into every column of
+the B tile, K stepped 16 channels at a time with the accumulator in integer
+registers. Traced on the new `int4-matvec-iu4` component.
+
+Alignment is **required, not tolerated**: `rows % 16 == 0` and `cols % 16 == 0`
+are rejected with EINVAL. A partial row-tile would have lanes writing rows that
+do not exist and a partial K step would have undefined channels, so a tail path
+would produce a plausible-looking wrong value, which AGENTS.md forbids. The
+rejection is explicit and the test asserts it.
+
+Implemented by a subagent, then **re-verified independently** before being
+recorded: `build-rx9070\rocminfer_int4_wmma_tests.exe` re-run here shows 10
+shapes `exact match`, 0 bad throughout, `PASSED`. `bench_matmul` re-run here
+shows `int4_matvec_iu4 correctness (all 64 rows, shared x): 0 bad  OK`.
+
+### ACCUMULATOR STAYS INTEGER — PROVEN, NOT ASSERTED
+The extracted gfx1201 device ELF shows the tile feeding its own destination
+back across every K step, so no FP32 conversion exists in the loop:
+
+```
+<_ZN9rocminfer26int4_matvec_iu4_i32_kernelEPiPKhS2_xx>:
+        global_load_b32 v13, v[10:11], off
+        global_load_b32 v14, v[8:9], off
+        v_wmma_i32_16x16x16_iu4 v[0:7], v13, v14, v[0:7] neg_lo:[1,1,0]
+        s_cbranch_scc0 65513   <...int4_matvec_iu4_i32_kernel+0xb0>
+```
+
+### THE RESULT THAT MATTERS: THE HARDWARE PATH IS SLOWER
+Bench, fastest of 5 timed passes, rows=64 cols=512, two invocations of the final
+binary run here:
+
+| path | run 1 | run 2 |
+|---|---|---|
+| int4_matvec (row-wise) | 1.296 | 1.292 |
+| int4_matvec_iu4 (WMMA) | 2.017 | 2.027 |
+| ratio iu4 / row-wise | 1.56x | 1.57x |
+
+**Decision: `Model::matvec_int4x` keeps routing through the row-wise kernel.**
+The tile path is implemented, verified, and benched but is deliberately not the
+dispatch target. The reason is recorded in `matvec_int4x`'s Doxygen `@note` so a
+later session does not "optimise" it back into a slower path on the assumption
+that a hardware instruction must win.
+
+Why it is slower is **hypothesis, not proof**: one wave owns 16 rows, so at
+rows=64 the tile path runs 4 blocks x 32 threads against the row-wise kernel's
+64 blocks x 256 threads, which points at a parallelism deficit rather than a
+matrix-core deficit. No shape sweep was run, because the bench workload is fixed
+at 64x512. Falsifying this requires sweeping rows at fixed cols and seeing
+whether the ratio crosses 1.0; that measurement was not taken.
+
+### STILL OPEN
+- The gfx1031 `v_dot8_i32_i4` fallback is **subagent-reported and not
+  independently reconfirmed here.** An attempt to verify it with
+  `clang++ -x hip --offload-arch=gfx1031 --cuda-device-only` produced an object
+  `llvm-objdump` rejected as invalid (`The file was not recognized as a valid
+  object file`), so the emit claim for RDNA2 rests on the subagent's gfx1031
+  device-ELF extraction, not on this session's own objdump. Treat it as
+  unverified rather than established.
+- Rate of the row-wise vs IU4 crossover vs `rows` (see the hypothesis above).
+- The ~400 us/launch bench stall source from RUN-010 is still unresolved, so
+  every number in this entry is one significant figure.
+- Sanitizer coverage remains host-only; the IU4 kernel is a HIP target and is
+  outside the sanitizer target set.
+
 ---
 
 ## RUN-009 - tests/test_fuzz.cpp completed and made deterministic

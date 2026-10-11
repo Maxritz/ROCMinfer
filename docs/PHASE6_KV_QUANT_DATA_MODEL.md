@@ -55,6 +55,26 @@ by the pinned source. Until it is derived from the pinned quantizer rather than
 assumed, no `ROCKVFP4_*` row may be written to the registry, and no golden may
 be generated. Record this as blocked rather than picking an order.
 
+Probed on 2026-10-11 rather than argued about. The pinned source delegates the
+packing to `torch.float4_e2m1fn_x2`, and torch 2.15.0a0 is installed here, so the
+order is in principle observable locally. It is not: constructing the dtype in
+eager mode fails with `copy_kernel not implemented for 'Float4_e2m1fn_x2'`, and
+`.view()` from float32 only reinterprets the float bit pattern (byte `0x3f`/`0x80`
+is `1.0f`'s tail), so it says nothing about packing. The dtype is declared but
+not constructible without a `torch.compile` path or the upstream tilelang
+quantizer, neither of which is authorised here.
+
+The published secondary sources also **disagree**, so they cannot settle it by
+consensus: ONNX's float4 page and the NVIDIA-`__nv_fp4x2`-compatible Rust crate
+both put the first element in the low nibble, while the nvfp4 description puts
+the even index in the high nibble. Choosing between them on a vote is exactly the
+"mistyped constant" failure class `AGENTS.md` §8a warns about, because two
+hand-copied copies of the same wrong table agree with each other.
+
+This blocks interop with the DeepSeek KV layouts only. It does **not** block an
+engine-internal integer-int4 format, whose packing this project defines itself;
+that work is not gated on this question and must not be conflated with it.
+
 ### `KvSlot` (one position's worth of KV, resident on device)
 
 | field | type | unit | invariant |

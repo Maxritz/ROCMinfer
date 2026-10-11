@@ -251,10 +251,21 @@ cmake --build build-hip --config RelWithDebInfo
   `include/rocminfer/{int4_wmma,int4_matvec}.hpp`, `Model::matvec_int4x` dispatch).
   gfx1201 emits the raw `__builtin_amdgcn_wmma_i32_16x16x16_iu4_w32_gfx12`
   builtin → `v_wmma_i32_16x16x16_iu4` (rocWMMA has no sub-byte path); gfx1031
-  emits paired `v_dot8_i32_i4`. 16/16 CTest green on RX 9070 XT; bench
+   emits paired `v_dot8_i32_i4`. 16/16 CTest green on RX 9070 XT; bench
   (rows=64 cols=512, median of 5, RUN-008): rocFP4 2.090 µs, int4_dot scalar
   1.336 µs, int4_matvec 1.454 µs. Those supersede the cold-clock 4.592/4.690 µs
   figures recorded in RUN-007(b).
+- Phase 5c: IU4-tile broadcast matvec `int4_matvec_iu4_i32`
+  (`src/kernels/int4_wmma.hip`) — implemented and bit-exact vs an exact int64
+  oracle on gfx1201 across 10 shapes, with the accumulator proven to stay in
+  integer registers (objdump shows `v_wmma_i32_16x16x16_iu4 v[0:7], v13, v14,
+  v[0:7]` feeding the destination back across every K step). **It is NOT wired
+  as the dispatch**, because it measured 2.02 µs/launch against the row-wise
+  kernel's 1.29 µs (1.56x slower) at 64x512, fastest of 5 timed passes,
+  RUN-011. Suspected parallelism-bound, not matrix-core-bound: one wave owns 16
+  rows, so 4 blocks x 32 threads vs the row-wise 64 x 256. `Model::matvec_int4x`
+  still routes row-wise, and the reason is recorded in its Doxygen `@note` so it
+  is not "optimised" back into a slower path.
 - Phase 6: architecture coverage (multi-family quant, KV-cache quant, vision,
   MoE); **researched, not yet started**. The intended data model for the KV-quant
   part is written down in `docs/PHASE6_KV_QUANT_DATA_MODEL.md` (three distinct

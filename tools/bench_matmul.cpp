@@ -12,6 +12,10 @@
  * - `int4_matvec_i32` : two's-complement int4 rows x ONE shared int4 vector ->
  *   int32 (broadcast matvec: each row contracts against the same activation
  *   vector, unlike `int4_dot_i32`'s paired-rows `a[r].b[r]`).
+ * - `int4_matvec_iu4_i32` : the same broadcast matvec driven by the RDNA4
+ *   `v_wmma_i32_16x16x16_iu4` matrix instruction (one wave per 16 output rows),
+ *   i.e. the engine's INT4 matmul hardware path on gfx1201, where `sdot8` does
+ *   not exist.
  *
  * The int4_dot correctness is pinned to an exact int64 CPU oracle on row 0. Each
  * kernel is timed with HIP events over many launches (min-of-N to suppress
@@ -26,6 +30,7 @@
 
 #include <rocminfer/int4_dot.hpp>
 #include <rocminfer/int4_matvec.hpp>
+#include <rocminfer/int4_wmma.hpp>
 #include <rocminfer/rocmfp4_dot.hpp>
 #include <rocminfer/rocmfp4_reference.hpp>
 
@@ -107,7 +112,7 @@ int run() {
     std::printf("device: %s  arch: %s  warpSize: %d\n", props.name, arch, props.warpSize);
 
     const std::int64_t rows = 64;
-    const std::int64_t cols = 512;          // multiple of 32 (ROCmFP4) and 8 (int4_dot)
+    const std::int64_t cols = 512;          // multiple of 16 (IU4 WMMA) and 8 (int4_dot)
     const int iters = 500;
     const int warm = 10;
 
@@ -173,6 +178,7 @@ int run() {
     void* dWm  = nullptr;
     void* dxm  = nullptr;
     void* dym  = nullptr;
+    void* dyu  = nullptr;
     hip_check(hipMalloc(&dfp4, fp4_bytes), "hipMalloc fp4");
     hip_check(hipMalloc(&dx, sizeof(float) * static_cast<std::size_t>(cols)), "hipMalloc dx");
     hip_check(hipMalloc(&dyf, sizeof(float) * static_cast<std::size_t>(rows)), "hipMalloc dyf");
@@ -193,6 +199,7 @@ int run() {
     hip_check(hipMalloc(&dWm, int4_bytes), "hipMalloc dWm");
     hip_check(hipMalloc(&dxm, xm_bytes), "hipMalloc dxm");
     hip_check(hipMalloc(&dym, sizeof(std::int32_t) * static_cast<std::size_t>(rows)), "hipMalloc dym");
+    hip_check(hipMalloc(&dyu, sizeof(std::int32_t) * static_cast<std::size_t>(rows)), "hipMalloc dyu");
     hip_check(hipMemcpy(dWm, a.data(), int4_bytes, hipMemcpyHostToDevice), "hipMemcpy dWm");
     hip_check(hipMemcpy(dxm, xm.data(), xm_bytes, hipMemcpyHostToDevice), "hipMemcpy dxm");
 
@@ -231,6 +238,37 @@ int run() {
                 static_cast<int>(got_mv0), static_cast<int>(expect_mv),
                 correct_mv ? "OK" : "MISMATCH");
 
+    // ---- Correctness: the IU4 WMMA matvec over every row vs the CPU oracle. ----
+    const int rc_iu4 =
+        rocminfer::int4_matvec_iu4_i32(static_cast<std::int32_t*>(dyu), dWm, dxm,
+                                       rows, cols, nullptr);
+    if (rc_iu4 != 0) {
+        std::fprintf(stderr, "int4_matvec_iu4_i32 returned %d\n", rc_iu4);
+        return 1;
+    }
+    hip_check(hipDeviceSynchronize(), "hipDeviceSynchronize (iu4 correctness)");
+    std::vector<std::int32_t> got_iu4(static_cast<std::size_t>(rows), 0);
+    hip_check(hipMemcpy(got_iu4.data(), dyu, static_cast<std::size_t>(rows) * sizeof(std::int32_t),
+                        hipMemcpyDeviceToHost),
+              "hipMemcpy got_iu4");
+    int iu4_bad = 0;
+    for (std::int64_t r = 0; r < rows; ++r) {
+        if (got_iu4[static_cast<std::size_t>(r)] !=
+            oracle_int4(a.data() + static_cast<std::size_t>(r) * int4_row_bytes, xm.data(), cols)) {
+            if (iu4_bad < 4) {
+                std::printf("  int4_matvec_iu4 row %lld: got=%d want=%d\n",
+                            static_cast<long long>(r), got_iu4[static_cast<std::size_t>(r)],
+                            oracle_int4(a.data() + static_cast<std::size_t>(r) * int4_row_bytes,
+                                        xm.data(), cols));
+            }
+            ++iu4_bad;
+        }
+    }
+    const bool correct_iu4 = (iu4_bad == 0);
+    std::printf("int4_matvec_iu4 correctness (all %lld rows, shared x): %d bad  %s\n",
+                 static_cast<long long>(rows), iu4_bad,
+                 correct_iu4 ? "OK" : "MISMATCH");
+
     // ---- Timing helpers. ----
     hipEvent_t t0{};
     hipEvent_t t1{};
@@ -249,6 +287,7 @@ int run() {
     float fp4_samples[kPasses] = {};
     float i32_samples[kPasses] = {};
     float mv_samples[kPasses] = {};
+    float iu4_samples[kPasses] = {};
 
     auto sample = [&](void (*launch)(void*, const void*, const void*, void*,
                                      std::int64_t, std::int64_t, void*),
@@ -305,6 +344,12 @@ int run() {
                                                  r, c, nullptr);
             },
             dym, dWm, dxm, rows, cols);
+    prewarm([](void* out, const void* a, const void* b, void*, std::int64_t r,
+               std::int64_t c, void*) {
+                (void)rocminfer::int4_matvec_iu4_i32(static_cast<std::int32_t*>(out), a, b,
+                                                     r, c, nullptr);
+            },
+            dyu, dWm, dxm, rows, cols);
 
     // Timing: ROCmFP4 fused matvec.
     sample([](void* out, const void* a, const void* b, void*, std::int64_t r,
@@ -330,6 +375,14 @@ int run() {
                                                 r, c, nullptr);
            },
            dym, dWm, dxm, rows, cols, mv_samples);
+
+    // Timing: int4 broadcast matvec on the RDNA4 IU4 WMMA hardware path.
+    sample([](void* out, const void* a, const void* b, void*, std::int64_t r,
+              std::int64_t c, void*) {
+               (void)rocminfer::int4_matvec_iu4_i32(static_cast<std::int32_t*>(out), a, b,
+                                                    r, c, nullptr);
+           },
+           dyu, dWm, dxm, rows, cols, iu4_samples);
 
     // The headline is the FATest pass, not the median. Every pass enqueues
     // `iters` launches between two stream events, so the t0->t1 window measures
@@ -367,10 +420,11 @@ int run() {
     const TimingSummary fp4_stat = summarize(fp4_samples);
     const TimingSummary i32_stat = summarize(i32_samples);
     const TimingSummary mv_stat = summarize(mv_samples);
+    const TimingSummary iu4_stat = summarize(iu4_samples);
 
     // A majority of the passes must be usable; fewer than that and the number
     // below is guesswork, so say so and exit non-zero instead of printing it.
-    for (const TimingSummary* s : {&fp4_stat, &i32_stat, &mv_stat}) {
+    for (const TimingSummary* s : {&fp4_stat, &i32_stat, &mv_stat, &iu4_stat}) {
         if (s->valid * 2 <= kPasses) {
             std::fprintf(stderr,
                          "FAIL: only %d of %d timing passes were usable\n",
@@ -384,7 +438,7 @@ int run() {
                 static_cast<long long>(rows), static_cast<long long>(cols));
     std::printf("  passes: %d timed passes x %d launches each%s\n", kPasses, iters,
                 fp4_stat.valid == kPasses && i32_stat.valid == kPasses &&
-                        mv_stat.valid == kPasses
+                         mv_stat.valid == kPasses && iu4_stat.valid == kPasses
                     ? " (headline = fastest pass)"
                     : " (headline = fastest pass; negative-span passes discarded)");
     std::printf("  rocFP4  dequant+FMA matvec : %9.3f us/launch  (median %.3f, max %.3f)\n",
@@ -396,16 +450,25 @@ int run() {
     std::printf("  int4_matvec (shared x)      : %9.3f us/launch  (median %.3f, max %.3f)\n",
                  static_cast<double>(mv_stat.lo), static_cast<double>(mv_stat.median),
                  static_cast<double>(mv_stat.hi));
+    std::printf("  int4_matvec_iu4 (WMMA path)  : %9.3f us/launch  (median %.3f, max %.3f)\n",
+                  static_cast<double>(iu4_stat.lo), static_cast<double>(iu4_stat.median),
+                  static_cast<double>(iu4_stat.hi));
     std::printf("  ratio  int4_dot / rocFP4    : %.2fx\n",
                 static_cast<double>(i32_stat.lo) / static_cast<double>(fp4_stat.lo));
     std::printf("  ratio  int4_matvec / rocFP4 : %.2fx\n",
                 static_cast<double>(mv_stat.lo) / static_cast<double>(fp4_stat.lo));
+    std::printf("  ratio  int4_matvec_iu4 / rocFP4 : %.2fx\n",
+                 static_cast<double>(iu4_stat.lo) / static_cast<double>(fp4_stat.lo));
+    std::printf("  ratio  int4_matvec_iu4 / int4_matvec : %.2fx\n",
+                 static_cast<double>(iu4_stat.lo) / static_cast<double>(mv_stat.lo));
     std::printf("  (headline is the fastest pass: t0->t1 spans 500 back-to-back launches and\n");
     std::printf("   therefore includes any GPU idle gap waiting on the host. Stalled passes\n");
     std::printf("   are discarded by taking the minimum, and the spread is printed above.)\n");
     std::printf("  (sdot8 is gfx1031/RDNA2-only; on this RX 9070 XT the int4_dot path is the\n");
-    std::printf("   scalar fallback. The RDNA4 hardware int4 path is the v_wmma_i32_16x16x16_iu4\n");
-    std::printf("   tile behind int4_wmma_16x16, single-wave, not a row-wise cast.\n");
+    std::printf("   scalar fallback. The RDNA4 hardware int4 path is the\n");
+    std::printf("   v_wmma_i32_16x16x16_iu4 tile behind int4_matvec_iu4_i32: one wave per 16\n");
+    std::printf("   output rows, the accumulator in integer registers across every 16-channel\n");
+    std::printf("   K step. int4_wmma_16x16 remains the single-tile primitive it was built as.)\n");
 
     hip_check(hipEventDestroy(t0), "hipEventDestroy t0");
     hip_check(hipEventDestroy(t1), "hipEventDestroy t1");
@@ -418,7 +481,8 @@ int run() {
     hip_check(hipFree(dWm), "hipFree dWm");
     hip_check(hipFree(dxm), "hipFree dxm");
     hip_check(hipFree(dym), "hipFree dym");
-    return (correct && correct_mv) ? 0 : 1;
+    hip_check(hipFree(dyu), "hipFree dyu");
+    return (correct && correct_mv && correct_iu4) ? 0 : 1;
 }
 
 }  // namespace
