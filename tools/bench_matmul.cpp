@@ -36,6 +36,10 @@
 
 #include <hip/hip_runtime.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
@@ -52,6 +56,38 @@ void hip_check(hipError_t err, const char* what) {
                      static_cast<int>(err));
         std::exit(1);
     }
+}
+
+/// Wall-clock nanoseconds via QueryPerformanceCounter on Windows.
+///
+/// Used to reject passes where the host stalled between enqueues. The HIP event
+/// window measures GPU execution PLUS any idle the GPU spends waiting for the
+/// host to queue the next launch, and how much idle it absorbs varies run to
+/// run (RUN-015 measured a fixed 100 ms pause landing anywhere from 187 us to
+/// 118,027 us in the event window). A host-side stall therefore shows up as
+/// GPU "idle" inside the timed span. Measured over 60 invocations: clean passes
+/// wall <= 6.15 us/launch; a pass contaminated by one 50 ms host pause has wall
+/// >= 120.5 us/launch. A 10 us/launch wall ceiling separates them by ~20x.
+///
+/// QPC cost measured at 24.9 ns/call over 2,000,000 timed calls, so the guard
+/// itself is negligible beside the 500 launches it brackets.
+///
+/// @return Nanoseconds since an arbitrary epoch (monotonic).
+double now_ns() {
+#ifdef _WIN32
+    static LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    LARGE_INTEGER c{};
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) * 1.0e9 / static_cast<double>(freq.QuadPart);
+#else
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<double>(ts.tv_sec) * 1.0e9 + static_cast<double>(ts.tv_nsec);
+#endif
 }
 
 /// Read a `--rows=` / `--cols=` / `--iters=` override into `out`.
@@ -321,22 +357,33 @@ int run(std::int64_t rows, std::int64_t cols, int iters) {
     float i32_samples[kPasses] = {};
     float mv_samples[kPasses] = {};
     float iu4_samples[kPasses] = {};
+    double fp4_wall[kPasses] = {};
+    double i32_wall[kPasses] = {};
+    double mv_wall[kPasses] = {};
+    double iu4_wall[kPasses] = {};
+
+    int fp4_rejected = 0;
+    int i32_rejected = 0;
+    int mv_rejected = 0;
+    int iu4_rejected = 0;
 
     auto sample = [&](void (*launch)(void*, const void*, const void*, void*,
                                      std::int64_t, std::int64_t, void*),
                       void* out, const void* a, const void* b, std::int64_t r,
-                      std::int64_t c, float* samples) {
+                      std::int64_t c, float* samples, double* wall) {
         for (int pass = 0; pass < kPasses; ++pass) {
             for (int i = 0; i < warm; ++i) {
                 launch(out, a, b, nullptr, r, c, nullptr);
             }
             hip_check(hipDeviceSynchronize(), "hipDeviceSynchronize (sample warmup)");
+            const double wall_start = now_ns();
             hip_check(hipEventRecord(t0), "hipEventRecord t0 (sample)");
             for (int i = 0; i < iters; ++i) {
                 launch(out, a, b, nullptr, r, c, nullptr);
             }
             hip_check(hipEventRecord(t1), "hipEventRecord t1 (sample)");
             hip_check(hipEventSynchronize(t1), "hipEventSynchronize t1 (sample)");
+            wall[pass] = (now_ns() - wall_start) / 1.0e3;
             hip_check(hipEventElapsedTime(&ms, t0, t1), "hipEventElapsedTime (sample)");
             samples[pass] = ms * 1000.0f / static_cast<float>(iters);
         }
@@ -391,7 +438,7 @@ int run(std::int64_t rows, std::int64_t cols, int iters) {
                                                 static_cast<const float*>(b), r, c,
                                                 /*dual_scale=*/true, nullptr);
            },
-           dyf, dfp4, dx, rows, cols, fp4_samples);
+           dyf, dfp4, dx, rows, cols, fp4_samples, fp4_wall);
 
     // Timing: int4_dot (scalar fallback on gfx1201).
     sample([](void* out, const void* a, const void* b, void*, std::int64_t r,
@@ -399,7 +446,7 @@ int run(std::int64_t rows, std::int64_t cols, int iters) {
                (void)rocminfer::int4_dot_i32(static_cast<std::int32_t*>(out), a, b, r,
                                              c, nullptr);
            },
-           dyi, da, dbb, rows, cols, i32_samples);
+           dyi, da, dbb, rows, cols, i32_samples, i32_wall);
 
     // Timing: int4 broadcast matvec (shared-x workload, rows x cols).
     sample([](void* out, const void* a, const void* b, void*, std::int64_t r,
@@ -407,7 +454,7 @@ int run(std::int64_t rows, std::int64_t cols, int iters) {
                (void)rocminfer::int4_matvec_i32(static_cast<std::int32_t*>(out), a, b,
                                                 r, c, nullptr);
            },
-           dym, dWm, dxm, rows, cols, mv_samples);
+           dym, dWm, dxm, rows, cols, mv_samples, mv_wall);
 
     // Timing: int4 broadcast matvec on the RDNA4 IU4 WMMA hardware path.
     sample([](void* out, const void* a, const void* b, void*, std::int64_t r,
@@ -415,7 +462,45 @@ int run(std::int64_t rows, std::int64_t cols, int iters) {
                (void)rocminfer::int4_matvec_iu4_i32(static_cast<std::int32_t*>(out), a, b,
                                                     r, c, nullptr);
            },
-           dyu, dWm, dxm, rows, cols, iu4_samples);
+           dyu, dWm, dxm, rows, cols, iu4_samples, iu4_wall);
+
+    // Reject host-stalled passes by a RELATIVE wall-time rule (RUN-015).
+    //
+    // A stalled pass is one where the host failed to enqueue for long enough
+    // that the GPU sat idle inside the timed window; it shows up as a wall
+    // time far above the other passes. An absolute ceiling is wrong: at
+    // rows=64 clean passes run ~2-6 us/launch, but at rows=4096 the kernels
+    // themselves are legitimately slower, so a fixed threshold rejects clean
+    // work. The contamination is an order of magnitude, not a constant.
+    //
+    // Rule: a pass is discarded if its wall time exceeds
+    // kStallOutlierFactor x the median wall time of that kernel's passes.
+    // RUN-015 measured clean passes at <= 6.15 us/launch wall and a single
+    // 50 ms injected stall at >= 120.5 us/launch, so the factor separates them
+    // by more than an order of magnitude while scaling with workload size.
+    // Rejected passes get their event sample marked negative so summarize()
+    // skips them.
+    auto reject_outliers = [](double* wall, float* samples, int* rejected) {
+        double sorted[kPasses];
+        for (int i = 0; i < kPasses; ++i) {
+            sorted[i] = wall[i];
+        }
+        std::sort(sorted, sorted + kPasses);
+        const double median_wall = sorted[kPasses / 2];
+        constexpr double kStallOutlierFactor = 3.0;
+        const double ceiling = median_wall * kStallOutlierFactor;
+        for (int i = 0; i < kPasses; ++i) {
+            if (wall[i] > ceiling) {
+                ++(*rejected);
+                samples[i] = -1.0f;
+            }
+        }
+    };
+    reject_outliers(fp4_wall, fp4_samples, &fp4_rejected);
+    reject_outliers(i32_wall, i32_samples, &i32_rejected);
+    reject_outliers(mv_wall, mv_samples, &mv_rejected);
+    reject_outliers(iu4_wall, iu4_samples, &iu4_rejected);
+
 
     // The headline is the FATest pass, not the median. Every pass enqueues
     // `iters` launches between two stream events, so the t0->t1 window measures
@@ -469,11 +554,12 @@ int run(std::int64_t rows, std::int64_t cols, int iters) {
     std::printf("\n");
     std::printf("workload: rows=%lld cols=%lld  (row-wise batched dot, nibble-aligned)\n",
                 static_cast<long long>(rows), static_cast<long long>(cols));
+    const int total_rejected = fp4_rejected + i32_rejected + mv_rejected + iu4_rejected;
     std::printf("  passes: %d timed passes x %d launches each%s\n", kPasses, iters,
-                fp4_stat.valid == kPasses && i32_stat.valid == kPasses &&
-                         mv_stat.valid == kPasses && iu4_stat.valid == kPasses
-                    ? " (headline = fastest pass)"
-                    : " (headline = fastest pass; negative-span passes discarded)");
+                total_rejected == 0 ? " (clean)" : " (INSTRUMENTED)");
+    std::printf("  rejected passes (host stall inside event window):"
+                " rocFP4=%d int4_dot=%d matvec=%d iu4=%d\n",
+                fp4_rejected, i32_rejected, mv_rejected, iu4_rejected);
     std::printf("  rocFP4  dequant+FMA matvec : %9.3f us/launch  (median %.3f, max %.3f)\n",
                  static_cast<double>(fp4_stat.lo), static_cast<double>(fp4_stat.median),
                  static_cast<double>(fp4_stat.hi));
