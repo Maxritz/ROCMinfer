@@ -251,26 +251,37 @@ cmake --build build-hip --config RelWithDebInfo
   `include/rocminfer/{int4_wmma,int4_matvec}.hpp`, `Model::matvec_int4x` dispatch).
   gfx1201 emits the raw `__builtin_amdgcn_wmma_i32_16x16x16_iu4_w32_gfx12`
   builtin → `v_wmma_i32_16x16x16_iu4` (rocWMMA has no sub-byte path); gfx1031
-   emits paired `v_dot8_i32_i4`. 16/16 CTest green on RX 9070 XT; bench
-  (rows=64 cols=512, median of 5, RUN-008): rocFP4 2.090 µs, int4_dot scalar
-  1.336 µs, int4_matvec 1.454 µs. Those supersede the cold-clock 4.592/4.690 µs
-  figures recorded in RUN-007(b).
+  emits paired `v_dot8_i32_i4`.
 - Phase 5c: IU4-tile broadcast matvec `int4_matvec_iu4_i32`
   (`src/kernels/int4_wmma.hip`) — implemented and bit-exact vs an exact int64
   oracle on gfx1201 across 10 shapes, with the accumulator proven to stay in
   integer registers (objdump shows `v_wmma_i32_16x16x16_iu4 v[0:7], v13, v14,
   v[0:7]` feeding the destination back across every K step).
-  **Which of the two int4 paths is faster depends on `rows`** (RUN-012 sweep,
-  gfx1201, best of 5 passes, cols=512): the IU4 path is 1.34-1.72x slower for
-  `rows` <= 128 but wins from `rows` >= 256 and is 8.3x faster at rows=4096,
-  because its cost is nearly flat in `rows` (one wave per 16 rows) while the
-  row-wise kernel's grows linearly. The earlier RUN-011 verdict that the IU4
-  path was uniformly "1.56x slower" was measured at rows=64 only and is
-  superseded. **Shape-based dispatch is not implemented yet**:
-  `Model::matvec_int4x` still routes row-wise, which is right for narrow decode
-  shapes and wrong for wide ones. The threshold and the full table are recorded
-  in its Doxygen `@note` so the routing is not "optimised" on the assumption
-  that either path wins everywhere.
+  **Shape-based dispatch is implemented**: `Model::matvec_int4x` takes the IU4
+  tile at `rows >= 256` when both dimensions are a multiple of 16, and the
+  row-wise kernel otherwise. Arch selection is a runtime
+  `hipGetDeviceProperties` query (not `__gfx1201__`, a device-compilation macro
+  that is unreliable from host code). Measured with the QPC stall guard on the
+  RX 9070 XT, `cols=512`: IU4 0.43× at rows=64, break-even at 128, **1.26× at
+  256**, 3.1× at 1024, 11.3× at 4096 — the tile is nearly flat in `rows` while
+  the row-wise kernel grows linearly. Threshold `kInt4MatvecIu4MinRows = 256`;
+  the full table is in its Doxygen `@note`.
+- Phase 5d: `Q4_0_INT4` weight format registered (type id **200**,
+  engine-internal — ggml has no raw-int4 type; the id survey is in
+  `docs/goldens/README.md`). 4 bytes / 8 weights, no scale, no codebook. Real
+  on-disk GGUF `docs/goldens/artifacts/int4-e2e.gguf` loads through
+  `GgufReader` → `Model::load_tensor` → `matvec_int4x`, all 320 rows bit-exact
+  vs int64 oracle, both dispatch branches evidenced by TraceRecorder component
+  counts. `Model::matvec` (the ROCmFP4 path) rejects the new format with
+  `EINVAL` so a scale-free tensor cannot be mis-decoded by the
+  dequantize-and-dot kernel.
+- Bench integrity: `tools/bench_matmul.cpp` carries a QPC stall guard that
+  rejects a timed pass whose wall time exceeds 3× the median of that kernel's
+  own passes. RUN-015 root-caused the ~400 µs/launch contamination to host
+  scheduling stalls landing inside the HIP event window (a fixed 100 ms pause
+  absorbed anywhere from 187 µs to 118,027 µs across 20 identical runs). Every
+  run reports `(clean)` or `(INSTRUMENTED)` plus per-kernel rejection counts.
+  This lifts the "one significant figure" caveat.
 - Phase 6: architecture coverage (multi-family quant, KV-cache quant, vision,
   MoE); **researched, not yet started**. The intended data model for the KV-quant
   part is written down in `docs/PHASE6_KV_QUANT_DATA_MODEL.md` (three distinct
@@ -279,6 +290,8 @@ cmake --build build-hip --config RelWithDebInfo
   `THIRD_PARTY_SOURCES.md` as the spec source, with the FP4 nibble order recorded
   as an unresolved blocker that prevents any registry row or golden being
   written. §6's sanitizer/fuzz and §5 items 5/6 are closed; see RUN-010.
+- Current test count: **18/18 CTest green** on the RX 9070 XT, build
+  warning-free, Doxygen clean.
 
 ## 10. Evaluated and not adopted
 
