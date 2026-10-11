@@ -78,26 +78,50 @@ void test_registry_separates_dual_and_fast() {
 void test_registry_lookup_and_enumeration() {
     CHECK(rocminfer::format_by_gguf_type("Q4_0_ROCMFP4") != nullptr);
     CHECK(rocminfer::format_by_gguf_type("Q4_0_ROCMFP4_FAST") != nullptr);
+    CHECK(rocminfer::format_by_gguf_type("Q4_0_INT4") != nullptr);
     // Unknown and near-miss types must not resolve to a neighbouring format.
     CHECK(rocminfer::format_by_gguf_type("Q4_0") == nullptr);
     CHECK(rocminfer::format_by_gguf_type("q4_0_rocmfp4") == nullptr);
     CHECK(rocminfer::format_by_gguf_type("Q4_0_ROCMFPX") == nullptr);
+    CHECK(rocminfer::format_by_gguf_type("Q4_0_ROCMI4") == nullptr);
     CHECK(rocminfer::format_by_gguf_type("") == nullptr);
 
-    CHECK(rocminfer::format_registry_size() == 2);
+    // Three rows: the two ROCmFP4 layouts plus the engine-internal raw int4.
+    CHECK(rocminfer::format_registry_size() == 3);
     for (std::size_t i = 0; i < rocminfer::format_registry_size(); ++i) {
         const rocminfer::FormatInfo* info = rocminfer::format_at(i);
         CHECK(info != nullptr);
         if (info != nullptr) {
             CHECK(info->id != rocminfer::QuantFormat::kUnknown);
             CHECK(info->block_bytes > 0);
-            CHECK(info->block_elements == 32);
+            CHECK(info->block_elements > 0);
+            // Derived bits-per-weight must agree with the block layout, so a
+            // mistyped block size cannot hide behind a nominal figure.
+            CHECK_F32(info->bits_per_weight,
+                      8.0f * static_cast<float>(info->block_bytes) /
+                          static_cast<float>(info->block_elements));
+            // Row bytes follow from the block geometry for every format.
             CHECK(rocminfer::format_row_bytes(*info, 64) ==
-                  (static_cast<std::size_t>(info->block_bytes) * 2));
+                  (64u / info->block_elements) * static_cast<std::size_t>(info->block_bytes));
         }
     }
     CHECK(rocminfer::format_at(99) == nullptr);
     CHECK(rocminfer::format_info(rocminfer::QuantFormat::kUnknown) == nullptr);
+
+    // The raw-int4 row: engine-internal type id, no codebook, no scale.
+    const rocminfer::FormatInfo* int4 =
+        rocminfer::format_info(rocminfer::QuantFormat::kSignedInt4);
+    CHECK(int4 != nullptr);
+    if (int4 != nullptr) {
+        CHECK(int4->block_elements == 8);
+        CHECK(int4->block_bytes == 4);
+        CHECK_F32(int4->bits_per_weight, 4.0f);
+        CHECK(!int4->dual_scale);
+        CHECK(int4->ggml_type_id == 200);
+        // 8 weights in 4 bytes, so a 64-weight row is 32 bytes and a 32-weight
+        // row is 16: the same packing the int4 kernels consume.
+        CHECK(rocminfer::format_row_bytes(*int4, 32) == 16);
+    }
 }
 
 // ---------------------------------------------------------------------------

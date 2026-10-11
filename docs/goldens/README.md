@@ -32,6 +32,37 @@ Provenance:
 (12.5, -9.75) and an exact zero so the upstream scale search exercises both its
 tail and its clip path.
 
+## Engine-internal signed-int4 artifact
+
+`artifacts/int4-e2e.gguf` is the one artifact in this directory that no
+upstream quantizer can produce, because ggml defines no raw signed-int4 type
+(`ggml.h` assigns 0..41 and 42..99 is an unused but still-active band; the
+nearest neighbours are `Q4_0` and `IQ4_NL`, both carried scales or codebooks).
+ROCMinfer therefore owns its type id, `GgmlType::kQ4_0Int4 = 200`, and owns the
+writer that emits the container. The byte layout is re-derived from the
+engine's own int4 kernels rather than from any upstream source, so this
+artifact is not bound by the "goldens come from the pinned quantizer" rule and
+is kept in a separate section for that reason.
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| `artifacts/int4-e2e.gguf` | 82,144 | `5a6d4ed2b2c610d937e2ce2a31f10985a7ea59db8883d8d993f017e72135ff91` |
+
+It holds two tensors of the engine-internal format, chosen to bracket the
+int4 dispatch threshold `kInt4MatvecIu4MinRows = 256`:
+
+| Tensor | Shape | Payload bytes | Intent |
+|---|---|---:|---|
+| `blk.0.ffn_gate_sq.weight` | 256 x 512 | 65,536 | IU4 WMMA tile path (`rows >= 256`) |
+| `blk.0.ffn_up_sq.weight` | 64 x 512 | 16,384 | row-wise kernel path (`rows < 256`) |
+
+Regenerate with `python tools/gen_int4_artifact.py`. The generator is
+deterministic (a fixed SplitMix64 seed), so re-running it reproduces the file
+byte for byte; the digest above is what a byte change would break. It also
+prints the per-payload SHA-256 for each tensor, which
+`tests/test_int4_format_e2e.cpp` reads back through `GgufReader` as its
+independent check that the loader read the same bytes the writer wrote.
+
 ## Cross-check result
 
 `tools/crosscheck_decode.py` decodes every ROCmFP4 tensor twice: once with an

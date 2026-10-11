@@ -493,6 +493,106 @@ Honesty notes attached to those numbers:
 - gfx1031 runtime numbers remain unmeasured (no local gfx1031 part); MACX
   (rr@10.0.0.11, source at `C:\x`) is the intended host.
 
+## [RUN-014] 2026-10-11 — MODE: FULL — genuine int4 weight format shipped; `matvec_int4x` now has a real caller
+
+### WHAT SHIPPED
+- Registry row `QuantFormat::kSignedInt4` / `GgmlType::kQ4_0Int4 = 200`
+  (`include/rocminfer/format_registry.hpp`, `src/format_registry.cpp`):
+  4 bytes, 8 two's-complement int4 weights, no scale, no codebook, 4.0 bpw.
+- `Model::matvec` (the ROCmFP4 path) now rejects a registered format that is
+  not a ROCmFP4 row, so the new int4 tensor cannot be mis-decoded by the
+  dequantize-and-dot kernel that has no scales to read.
+- `tools/gen_int4_artifact.py` + `docs/goldens/artifacts/int4-e2e.gguf`: a real
+  on-disk GGUF carrying one int4 tensor per dispatch branch.
+- `tests/test_int4_format_e2e.cpp`: end-to-end load-oracle-dispatch proof.
+
+### TYPE ID SURVEY (why 200, not a lower id)
+Read off the pinned revision `H:\ports\ROCmFPX\ggml\include\ggml.h`
+(`enum ggml_type`, `GGML_TYPE_COUNT = 109`):
+
+| Range | Assigned | Verdict |
+|---|---|---|
+| 0..41 | F32, F16, Q4_0..Q8_K, IQ2_XXS..IQ4_XS, I8..I64, F64, IQ1_M, BF16, TQ1_0, TQ2_0, MXFP4(39), NVFP4(40), Q1_0(41) | taken, and still growing |
+| 4, 5, 31..33, 36..38 | removed / commented out upstream | not safe: ggml has re-used removed ids before |
+| 42..99 | nothing | unused but inside the dense band; claiming it is not stable |
+| 100..108 | ROCmFPX experimental (Q4_0_ROCMFP4, _FAST, Q6_0/Q8_0/Q3_0/Q2_0_ROCMFPX, TURBO3_0, TURBO4_0, Q4_0_ROCMI4) | taken |
+| 109 | `GGML_TYPE_COUNT` | first id ggml has not issued |
+
+ggml has **no** raw-int4 type. The two nearest neighbours are both taken and
+neither matches: `Q4_0` (2) is a block + FP16 scale, `IQ4_NL` (20) is a
+non-linear codebook, and ROCmFPX's `Q4_0_ROCMI4` (108) is signed nibbles
+*with a UE4M3 scale*. So 200 was chosen strictly above the largest id that
+revision issues: no ggml consumer can mistake it for a type it knows, and no
+future ggml type can be issued into the low band and collide with it.
+
+### PACKING (matches the kernels exactly)
+Element `k` of a row occupies the **low nibble of byte `k/2` when `k` is even
+and the high nibble when odd**, two nibbles per byte, `rows * (cols/2)` bytes
+row-major with no padding. This is the contract documented in
+`include/rocminfer/int4_wmma.hpp` and implemented identically by
+`src/kernels/int4_matvec.hip` (`load_group`, nibble `t` at bits `4*t..4*t+3`)
+and `src/kernels/int4_wmma.hip` (`load_u32_le`, lane L's A word reading
+`A[row][kbase + t]`). The e2e test's own unpacker uses the same rule and
+round-trips every activation byte, so a writer/kernel disagreement would
+mis-decode rather than pass.
+
+### VERIFIED ON GPU THIS RUN (all commands run, output real)
+- Full build `-Wall -Wextra -Werror`: **zero warnings**.
+- `ctest`: **17/17**, incl. `doxy-validate` (`WARN_AS_ERROR=YES`).
+- `tests/test_int4_format_e2e.exe`, on `docs/goldens/artifacts/int4-e2e.gguf`:
+  ```
+  blk.0.ffn_gate_sq.weight   rows= 256 cols= 512  bit-exact vs int64 oracle (0/256 bad)
+    dispatch evidence: component 'int4-matvec-iu4' ops=1, other path ops=0
+  blk.0.ffn_up_sq.weight     rows=  64 cols= 512  bit-exact vs int64 oracle (0/64 bad)
+    dispatch evidence: component 'int4-matvec' ops=1, other path ops=0
+  negative tests
+    payload truncated by one row       refused by Model::open: 34
+    declared rows exceed payload       refused by Model::open: 34
+    output.weight                      rejected: EINVAL (format=Q4_0_ROCMFP4, dual_scale=1)
+  ```
+  Every one of 320 output rows (256 + 64) matches an exact int64 oracle with
+  **zero tolerance**: the int4 product is exact, so any mismatch is a decode
+  or dispatch defect rather than rounding.
+- Artifact regeneration is byte-deterministic; the file digest
+  `5a6d4ed2...` was reproduced by CPython `hashlib`, not by this engine.
+
+### DISPATCH EVIDENCE (not a timing claim)
+Which kernel ran is taken from the recorder, not from clock readings: the two
+launchers record on distinct components (`int4-matvec-iu4` and
+`int4-matvec`), so a per-component op count is direct evidence of the code
+path executed. Each shape records `ops=1` on its expected component and
+`ops=0` on the other. The BENCH numbers below are quoted separately and are
+consistent with that routing, but they are not the proof:
+
+| rows | int4_matvec (row-wise) | int4_matvec_iu4 (WMMA) | ratio |
+|---:|---:|---:|---:|
+| 256 | 3.173 | 1.165 | 0.37x IU4 wins |
+| 64 | 5.811 | 6.710 | 1.15x row-wise wins |
+
+Both agree with RUN-012's threshold `kInt4MatvecIu4MinRows = 256`: the tile
+wins from 256 up, the row-wise kernel wins below it.
+
+### CORRECTED
+- `tests/test_rocmfp4.cpp` asserted `format_registry_size() == 2` and that
+  every registry row has `block_elements == 32`. Both were properties of the
+  two-row table, not of the registry contract, and had to be restated as the
+  derivation invariants (`bits_per_weight == 8*block_bytes/block_elements`,
+  `row_bytes == (elements/block_elements)*block_bytes`) that hold for the new
+  row as well. The dual-scale/FAST checks are unchanged in strength.
+- `Model::matvec` accepted any registered format; with an int4 row registered
+  that would have routed scale-free two's-complement nibbles into a kernel
+  that dequantises Codebook10 magnitudes. Now rejected with `EINVAL`.
+
+### STILL OPEN (tracked, not faked)
+- `matvec_int4x` has no caller inside a *model graph* yet: this closes the
+  "is it wired to a real file" question, not the "does the engine call it
+  during decode" one. That is Phase 4 scheduler work.
+- The FP4 nibble order for DeepSeek KV interop (needs tilelang codegen or a
+  `torch.compile` path; neither authorised here).
+- The ~400 us/launch bench stall source from RUN-010 remains unresolved, so
+  every bench number here is one significant figure.
+- gfx1031 runtime numbers are still unmeasured — no RDNA2 silicon locally.
+
 ## [RUN-011] 2026-10-11 — MODE: FULL — IU4-tile broadcast matvec: built, bit-exact, and measured SLOWER than the row-wise path
 
 ### WHAT SHIPPED
@@ -912,4 +1012,95 @@ looks the same from the library side as it does from the ISA side.
   number here is one significant figure.
 - gfx1031 runtime numbers are still unmeasured — no RDNA2 silicon locally; MACX
   (rr@10.0.0.11, source at `C:\x`) is the intended host.
+
+## [RUN-015] 2026-10-11 — MODE: FULL — the ~400 us/launch bench stall is ROOT-CAUSED; it was the measurement window, not the GPU
+
+### BASELINE
+- Symptom: `tools/bench_matmul` needs a "fastest of N timed passes" headline
+  because the raw timing is contaminated by intermittent stall episodes up to
+  ~400 us/launch (extreme observations 296 us and 10,600 us), which rotates
+  between kernels across invocations and forced every throughput number in the
+  repo down to "one significant figure" (RUN-010).
+- Method unchanged: each timed pass enqueues 500 launches between two
+  `hipEventBlockingSync` events and divides the `hipEventElapsedTime` span by 500.
+  That window therefore measures GPU execution **plus every idle gap the GPU
+  spends waiting for the host to enqueue the next launch**.
+
+### FINDINGS (all measured; see COMMANDS)
+
+| Rank | Finding | Evidence | Status |
+|---|---|---|---|
+| 1 | The stall is **host-side enqueue latency landing inside the event window**, not GPU time | one injected 50 ms `Sleep()` after launch 250/500 inflates the headline 25-50x: rocFP4 2.135 -> 75.356 us/launch, int4_dot 1.585 -> 74.557 | PROVEN |
+| 2 | It does **not** reproduce unaided | 180 invocations of the real bench (300 timed passes): slowest pass ever 4.811 us/launch; a faithful 4-kernel re-implementation x120 (2400 passes): no pass above 20 us/launch | PROVEN |
+| 3 | A trivial 500-launch program is clean on its own | `probe.exe`: 1.573/0.758/0.703/0.788/2.406 us/launch, host max-gap 9.0-23.5 us, **zero gaps > 50 us** | PROVEN |
+| 4 | `hipEventElapsedTime`'s handling of host idle is **unstable** | fixed 100 ms pause, 20 identical runs: fully included 16/20, partially 2/20, **entirely excluded 2/20**; the same pause measured 187 us -> 118,027 us (**630x**) across 8 runs | PROVEN |
+| 5 | The contamination is real wall time and is detectable from the host | clean passes wall <= 6.15 us/launch; contaminated >= 120.5 us/launch; a QPC guard separates them with a 20x gap | PROVEN |
+| 6 | Host measurement is not the artifact | `QueryPerformanceCounter` = 24.9 ns/call over 2,000,000 timed calls | PROVEN |
+| 7 | No GPU contention is needed | with a fully GPU-saturating concurrent spin kernel: 1.811-1.984 us/launch, uninflated; background GPU engines mean 9.35%, Radeon Software / Electron resident but ~0.1-0.6% each | PROVEN |
+| 8 | Event flags are irrelevant | blocking vs `hipEventDefault`: 0.703-2.406 vs 0.806-1.707 us/launch | PROVEN |
+| 9 | Separately, the bench carries a ~200 us fixed cost per timed window | `--iters=50` gives 3.4-6.0 us/launch vs 1.70-1.75 at `--iters=2000`; deleting the per-pass `hipDeviceSynchronize` at iters=50 gave 6.018 -> 1.946 (3.1x), but at the default iters=500 only 2.006 -> 1.976 | PROVEN |
+
+### ROOT CAUSE
+The measurement window is **host-latency-sensitive**. `hipEventElapsedTime` over
+500 back-to-back launches includes GPU idle caused by the host failing to enqueue
+the next launch, and *how much* of that idle the event window absorbs varies
+(run to run: 630x for an identical fixed pause). So RUN-010's ~400 us episodes
+were host scheduling stalls captured inside a GPU-side window, not GPU work — and
+the reason `int4_dot` "was usually clean while its neighbours stalled" is that
+its GPU window is already shorter than its host enqueue rate (0.574 us event vs
+1.43 us host loop), so there is no busy->idle transition to perturb.
+
+The important correction: **"the OS is unreliable" is wrong**. The minimal
+program never stalls; the defect is that the bench's window has **no stall
+guard**, so a rare host stall is silently absorbed into a number that is then
+reported as GPU throughput.
+
+### WHY IT WAS HARD TO SEE
+The contaminated pass is genuinely slower in wall-clock terms, so it looks like a
+slow kernel rather than a measurement defect. The rotation between kernels
+across invocations made it read as contention or thermal throttling, and
+`int4_dot` being usually clean looked like a discriminator when it is an artifact
+of its own enqueue rate. Worse, the same contamination can hit all five passes of
+one kernel in a single process, in which case even the "fastest pass" headline is
+contaminated — so the existing mitigation was insufficient, not merely ugly.
+
+### MITIGATIONS (no system change needed; measured basis)
+1. **QPC stall guard**: reject any pass whose wall/launch exceeds ~10 us. In all
+   4 repeats that discarded every contaminated pass (clean max 6.15 vs
+   contaminated min 120.5 us/launch). Cost: 2 x 24.9 ns per pass.
+2. Report the fast-of-N headline **and the QPC that produced it**, marking the
+   run "instrumented" when any pass was rejected, so contamination cannot
+   silently become a headline.
+3. Never use `--iters` below ~500: at 50 the ~200 us fixed window cost alone
+   makes the same kernel 2-3x slower.
+4. Precision now achievable, measured over 60 invocations (fastest-pass IQR):
+   **+/-10-15% from >= 3 invocations** — the "one significant figure" caveat
+   can be relaxed to that.
+
+### NOT DONE / STILL OPEN
+- The QPC guard is **not yet implemented** in `tools/bench_matmul.cpp`; these are
+  measured mitigations, not shipped code.
+- The driver-side mechanism behind the 16/20 included vs 2/20 excluded split is
+  unresolved (clock/power state across the busy->idle transition is the leading
+  theory).
+- RUN-012's rows sweep still carries the old caveat and should be re-baselined
+  with the guard, since the IU4/row-wise crossover sits between rows=128 and 256
+  where the two paths differ by 1.34x — close to the measured noise.
+- The remaining open item from RUN-013's list (a genuine int4 weight format) was
+  **closed by RUN-014**; this entry supersedes RUN-013's "still open" line about
+  the stall.
+
+### COMMANDS
+```
+build-rx9070\rocminfer_bench_matmul.exe --rows=64 --cols=512 --iters=500   (x60)
+build-rx9070\rocminfer_bench_matmul.exe --rows=64 --cols=512 --iters=50|100|500|2000
+probe.exe --iters=500 --passes=5 [--eventflags=noblocking] [--kernel=spin]
+probe2.exe --rows=64 --cols=512 --iters=500 --thresh=20   (x120, 2400 passes)
+probe3.exe --iters=200 --sleepms=100                      (x20, regime histogram)
+probe4.exe --iters=500 --stallms=50 --stallat=250 --trials=5   (x4 repeats)
+Get-Process / Get-Counter '\GPU Engine(*)\Utilization Percentage'   (read-only)
+```
+(All probe programs were scratch under the temp dir; none were committed.)
+
+
 

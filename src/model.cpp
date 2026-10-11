@@ -187,6 +187,14 @@ int Model::matvec(std::string_view name, const float* x, float* y,
     if (slot->format == nullptr) {
         return EINVAL;
     }
+    // The fused dequantize-and-dot kernel only understands a ROCmFP4 block.
+    // A registered format that is not one of them (the engine-internal raw
+    // int4 row) carries no scales and no Codebook10 magnitudes, so routing it
+    // here would mis-decode every weight instead of failing loudly.
+    if (slot->format->id != QuantFormat::kRocmFP4 &&
+        slot->format->id != QuantFormat::kRocmFP4Fast) {
+        return EINVAL;
+    }
 
     const std::uint64_t rows_u = static_cast<std::uint64_t>(rows);
     const std::uint64_t cols_u = static_cast<std::uint64_t>(cols);

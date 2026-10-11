@@ -283,6 +283,13 @@ if(ROCMINFER_ENABLE_HIP)
     target_link_libraries(rocminfer_int4_wmma_tests PRIVATE rocminfer_core)
     add_test(NAME int4_wmma COMMAND rocminfer_int4_wmma_tests)
 
+    # Q4_0_INT4 registered format: a real GGUF on disk loaded through
+    # GgufReader, then Model::matvec_int4x against an exact int64 oracle,
+    # plus both dispatch branches and the negative gates.
+    add_executable(rocminfer_int4_format_e2e_tests tests/test_int4_format_e2e.cpp)
+    target_link_libraries(rocminfer_int4_format_e2e_tests PRIVATE rocminfer_core)
+    add_test(NAME int4_format_e2e COMMAND rocminfer_int4_format_e2e_tests)
+
     add_executable(rocminfer_bench_matmul tools/bench_matmul.cpp)
     target_link_libraries(rocminfer_bench_matmul PRIVATE rocminfer_core)
 
