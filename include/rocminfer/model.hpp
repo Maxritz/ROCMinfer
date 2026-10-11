@@ -190,16 +190,31 @@ public:
      * @pre The tensor is resident, `x_int4` holds `cols / 2` packed bytes,
      *      `y` holds `rows` int32 values.
      * @post On success the kernel launch is enqueued on `stream`.
-     * @note This routes through the row-wise `int4_matvec_i32_traced` and not the
-     *       `int4_matvec_iu4_i32` WMMA tile, and that is a measurement rather
-     *       than a preference: on gfx1201 the `v_wmma_i32_16x16x16_iu4` tile
-     *       measured 2.02 us/launch against the row-wise kernel's 1.29 us on the
-     *       64x512 bench, 1.56x slower, with the accumulator held in integer
-     *       registers throughout. The suspected cause is parallelism, not the
-     *       matrix core: one wave owns 16 rows, so at rows=64 the tile path runs
-     *       4 blocks x 32 threads against the row-wise kernel's 64 x 256.
-     *       Revisit the routing if the tile path gains parallelism. Do not switch
-     *       on the assumption that a hardware instruction must be faster.
+     * @note This routes through the row-wise `int4_matvec_i32_traced` and not
+     *       the `int4_matvec_iu4_i32` WMMA tile, and which one is faster depends
+     *       on `rows`, so the choice below is a shape-dependent decision that is
+     *       currently decided in favour of the row-wise kernel only because the
+     *       engine's decode shapes are narrow. Measured on gfx1201, best of five
+     *       passes, cols=512:
+     *
+     *         rows    row-wise    IU4      ratio
+     *          16       1.179    2.032     1.72x
+     *          32       1.383    2.062     1.49x
+     *          64       1.428    1.931     1.35x
+     *         128       1.336    1.792     1.34x
+     *         256       2.671    2.061     0.77x  <- IU4 wins from here on
+     *         512       4.033    2.084     0.52x
+     *        1024       5.643    1.946     0.34x
+     *        2048       7.650    1.801     0.24x
+     *        4096      16.729    2.013     0.12x
+     *
+     *       The row-wise cost grows roughly linearly in `rows` while the IU4 cost
+     *       is nearly flat, because one wave owns 16 rows and each wave does 16
+     *       K-steps of a 16x16x16 tile. Shape-based dispatch is therefore the
+     *       correct long-term answer and is **not implemented yet**: this entry
+     *       point has no `rows` threshold today. Do not read the table above as
+     *       "the WMMA path is slower"; it is slower only at small `rows`, and at
+     *       rows=4096 it is 8.3x faster. See sherlock RUN-012.
      * @warning The tensor's nibbles must be genuine two's-complement signed
      *          int4; this entry point performs no per-nibble validation.
      */

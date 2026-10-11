@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -51,6 +52,26 @@ void hip_check(hipError_t err, const char* what) {
                      static_cast<int>(err));
         std::exit(1);
     }
+}
+
+/// Read a `--rows=` / `--cols=` / `--iters=` override into `out`.
+///
+/// A malformed or non-positive value is a usage error rather than a silent
+/// clamp, because the kernels under test each carry an alignment rule: a shape
+/// that quietly rounded would still run and produce a plausible wrong number.
+bool parse_index(const char* arg, const char* prefix, std::int64_t* out) {
+    const std::size_t n = std::strlen(prefix);
+    if (std::strncmp(arg, prefix, n) != 0) {
+        return false;
+    }
+    char* end = nullptr;
+    const long long v = std::strtoll(arg + n, &end, 10);
+    if (end == arg + n || *end != '\0' || v <= 0) {
+        std::fprintf(stderr, "bench_matmul: bad value for %s: '%s'\n", prefix, arg + n);
+        std::exit(1);
+    }
+    *out = static_cast<std::int64_t>(v);
+    return true;
 }
 
 /// Simple splitmix64-style PRNG so the synthetic weights are reproducible.
@@ -93,7 +114,7 @@ std::int32_t oracle_int4(const std::uint8_t* a, const std::uint8_t* b, std::int6
     return static_cast<std::int32_t>(sum);
 }
 
-int run() {
+int run(std::int64_t rows, std::int64_t cols, int iters) {
     if (hipSetDevice(0) != hipSuccess) {
         std::fprintf(stderr, "hipSetDevice failed\n");
         return 1;
@@ -111,9 +132,21 @@ int run() {
     const char* arch = (props.gcnArchName[0] != '\0') ? props.gcnArchName : kArch;
     std::printf("device: %s  arch: %s  warpSize: %d\n", props.name, arch, props.warpSize);
 
-    const std::int64_t rows = 64;
-    const std::int64_t cols = 512;          // multiple of 16 (IU4 WMMA) and 8 (int4_dot)
-    const int iters = 500;
+    if ((cols % 16) != 0) {
+        std::fprintf(stderr,
+                     "bench_matmul: cols must be a multiple of 16 (the IU4 tile and\n"
+                     "                 int4_dot both carry alignment rules); got %lld\n",
+                     static_cast<long long>(cols));
+        return 1;
+    }
+    if ((rows % 16) != 0) {
+        std::fprintf(stderr,
+                     "bench_matmul: rows must be a multiple of 16 (the IU4 tile owns\n"
+                     "                 exactly 16 rows per wave); got %lld\n",
+                     static_cast<long long>(rows));
+        return 1;
+    }
+
     const int warm = 10;
 
     // ---- ROCmFP4 weight tensor: rows x cols as Q4_0_ROCMFP4 (dual scale). ----
@@ -487,6 +520,23 @@ int run() {
 
 }  // namespace
 
-int main() {
-    return run();
+int main(int argc, char** argv) {
+    std::int64_t rows = 64;
+    std::int64_t cols = 512;
+    std::int64_t iters = 500;
+    for (int i = 1; i < argc; ++i) {
+        if (!parse_index(argv[i], "--rows=", &rows) && !parse_index(argv[i], "--cols=", &cols) &&
+            !parse_index(argv[i], "--iters=", &iters)) {
+            std::fprintf(stderr,
+                         "usage: bench_matmul [--rows=N] [--cols=N] [--iters=N]\n"
+                         "  rows, cols must be positive multiples of 16; iters positive.\n");
+            return 1;
+        }
+    }
+    if (iters < 1 || iters > 1000000) {
+        std::fprintf(stderr, "bench_matmul: iters out of range: %lld\n",
+                     static_cast<long long>(iters));
+        return 1;
+    }
+    return run(rows, cols, static_cast<int>(iters));
 }

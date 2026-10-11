@@ -259,13 +259,18 @@ cmake --build build-hip --config RelWithDebInfo
   (`src/kernels/int4_wmma.hip`) — implemented and bit-exact vs an exact int64
   oracle on gfx1201 across 10 shapes, with the accumulator proven to stay in
   integer registers (objdump shows `v_wmma_i32_16x16x16_iu4 v[0:7], v13, v14,
-  v[0:7]` feeding the destination back across every K step). **It is NOT wired
-  as the dispatch**, because it measured 2.02 µs/launch against the row-wise
-  kernel's 1.29 µs (1.56x slower) at 64x512, fastest of 5 timed passes,
-  RUN-011. Suspected parallelism-bound, not matrix-core-bound: one wave owns 16
-  rows, so 4 blocks x 32 threads vs the row-wise 64 x 256. `Model::matvec_int4x`
-  still routes row-wise, and the reason is recorded in its Doxygen `@note` so it
-  is not "optimised" back into a slower path.
+  v[0:7]` feeding the destination back across every K step).
+  **Which of the two int4 paths is faster depends on `rows`** (RUN-012 sweep,
+  gfx1201, best of 5 passes, cols=512): the IU4 path is 1.34-1.72x slower for
+  `rows` <= 128 but wins from `rows` >= 256 and is 8.3x faster at rows=4096,
+  because its cost is nearly flat in `rows` (one wave per 16 rows) while the
+  row-wise kernel's grows linearly. The earlier RUN-011 verdict that the IU4
+  path was uniformly "1.56x slower" was measured at rows=64 only and is
+  superseded. **Shape-based dispatch is not implemented yet**:
+  `Model::matvec_int4x` still routes row-wise, which is right for narrow decode
+  shapes and wrong for wide ones. The threshold and the full table are recorded
+  in its Doxygen `@note` so the routing is not "optimised" on the assumption
+  that either path wins everywhere.
 - Phase 6: architecture coverage (multi-family quant, KV-cache quant, vision,
   MoE); **researched, not yet started**. The intended data model for the KV-quant
   part is written down in `docs/PHASE6_KV_QUANT_DATA_MODEL.md` (three distinct

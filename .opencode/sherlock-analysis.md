@@ -562,6 +562,83 @@ whether the ratio crosses 1.0; that measurement was not taken.
 - Sanitizer coverage remains host-only; the IU4 kernel is a HIP target and is
   outside the sanitizer target set.
 
+## [RUN-012] 2026-10-11 — MODE: FULL — row-count sweep: the IU4 path DOES win, and RUN-011's "1.56x slower" verdict was wrong
+
+### WHAT WAS DONE
+`tools/bench_matmul.cpp` gained `--rows=N`, `--cols=N`, `--iters=N` so a shape can
+be swept instead of being hardcoded to 64x512. A malformed or non-positive value
+is a usage error rather than a silent clamp, because the kernels under test each
+carry an alignment rule and a rounded shape would still run while producing a
+plausible wrong number. `rows % 16` and `cols % 16` are rejected explicitly.
+
+### THE SWEEP — and it reverses the previous conclusion
+
+gfx1201, cols=512, best of five timed passes, us/launch:
+
+| rows | row-wise | IU4 tile | ratio iu4/row-wise |
+|---|---|---|---|
+| 16 | 1.179 | 2.032 | 1.72x |
+| 32 | 1.383 | 2.062 | 1.49x |
+| 64 | 1.428 | 1.931 | 1.35x |
+| 128 | 1.336 | 1.792 | 1.34x |
+| 256 | 2.671 | 2.061 | 0.77x |
+| 512 | 4.033 | 2.084 | 0.52x |
+| 1024 | 5.643 | 1.946 | 0.34x |
+| 2048 | 7.650 | 1.801 | 0.24x |
+| 4096 | 16.729 | 2.013 | 0.12x |
+
+The crossover is between 128 and 256 rows, and at 4096 rows the IU4 path is
+**8.3x faster**. The row-wise cost grows roughly linearly in `rows` while the IU4
+cost is nearly flat (2.03 down to 1.80 across a 256x increase in rows), because
+one wave owns 16 rows and each wave walks 16 K-steps of a 16x16x16 tile.
+
+### WHY THIS IS RECORDED AS A CORRECTION, NOT AN UPDATE
+
+RUN-011 concluded "the hardware path is slower, keep the row-wise dispatch" from
+a single measurement at rows=64. That was a shape-bound result generalised to all
+shapes. The hypothesis recorded in RUN-011 (parallelism deficit at small `rows`,
+not a matrix-core deficit) is what the sweep confirms: at rows=64 the IU4 path
+runs 4 blocks x 32 threads against the row-wise 64 x 256, and as `rows` grows the
+IU4 wave count grows while its per-wave work does not, so its cost flattens.
+
+`Model::matvec_int4x` **still routes row-wise.** That is defensible for this
+engine's decode shapes, which are narrow, and indefensible for wide ones, so the
+gap is stated rather than closed: shape-based dispatch is not implemented, and
+the threshold plus the full table now live in `matvec_int4x`'s Doxygen `@note` so
+a later session cannot "optimise" in either direction on a one-point
+measurement. Implementing the threshold requires a decision on where to draw it,
+which is an engine-scheduling question rather than a kernel question.
+
+### ON THE FP4 NIBBLE ORDER: FETCHING THE REFERENCE DID NOT SETTLE IT
+
+`inference/kernel.py` was fetched from the pinned DeepSeek revision to look for
+the packing rule, following the same rule that closed Phase 1: where a reference
+implementation exists, read or run it rather than choosing between secondary
+sources. **It does not state the nibble order.** The packing is delegated to
+tilelang's `float4_e2m1fn` codegen: the kernel writes `y_local = T.Cast(FP4, ...)`
+and `T.copy(y_local, y_shared)`, so the two-per-byte layout is inside tilelang,
+not in this file.
+
+What the fetch does confirm, and which is worth keeping:
+- output shape is `N // 2` bytes (`z.new_empty(*shape[:-1], N // 2, dtype=torch.float4_e2m1fn_x2)`), so two values per byte;
+- "The FP4 values are packed along the K (last) dimension" — the *value order*
+  along the tensor is K-major, which is a different question from which nibble
+  holds the even k;
+- main compressed KV uses one FP8 E4M3 scale per 16 with `amax/6` floored at
+  `6*2^-9`; the indexer uses UE8M0 per 32 floored at `6*2^-126`.
+
+So the blocker from the data model stands: the intra-byte nibble order needs
+either tilelang's codegen or a `torch.compile` path, neither of which is
+authorised here. It remains recorded as unresolved, and it still blocks only
+DeepSeek KV interop, not an engine-internal int4 format.
+
+### ALSO STILL OPEN
+- Shape-based dispatch for the two int4 paths (threshold undecided).
+- The ~400 us/launch bench stall source from RUN-010 is still unresolved, so
+  every number above is one significant figure.
+- gfx1031 emit for the IU4 fallback remains unverified by this session's own
+  objdump (RUN-011).
+
 ---
 
 ## RUN-009 - tests/test_fuzz.cpp completed and made deterministic
