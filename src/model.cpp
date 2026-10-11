@@ -10,6 +10,7 @@
 #include "rocminfer/model.hpp"
 
 #include "rocminfer/int4_matvec.hpp"
+#include "rocminfer/int4_wmma.hpp"
 #include "rocminfer/profiler.hpp"
 #include "rocminfer/rocmfp4_dot.hpp"
 #include "rocminfer/sha256.hpp"
@@ -24,6 +25,40 @@
 #include <vector>
 
 namespace rocminfer {
+
+namespace {
+
+#ifdef ROCMINFER_HAVE_HIP
+/**
+ * @brief Report whether this device can run the IU4 WCMA int4 tile.
+ *
+ * The device arch is queried once and cached, because `__gfx1201__` is a device
+ * compilation macro and is not reliably visible from a host translation unit:
+ * testing it from host code could silently answer false on a machine that does
+ * have the instruction, and a dispatch that quietly never selects its fast path
+ * is the failure mode `AGENTS.md` forbids.
+ *
+ * @return true when the arch is GFX12 (RDNA4 and successors), which is the only
+ *         family whose int4 matrix path is `v_wmma_i32_16x16x16_iu4`.
+ * @pre `hipSetDevice` has selected the intended device, or device 0 is correct.
+ * @post The first call queries the runtime; later calls read the cached answer.
+ * @note The `gfx12` prefix covers gfx1200, gfx1201 and gfx1250 without naming
+ *       each one, so a newly released RDNA4 derivative does not silently fall
+ *       back to the slower path.
+ */
+bool int4_matvec_iu4_is_available() noexcept {
+    static const bool available = [] {
+        hipDeviceProp_t props{};
+        if (hipGetDeviceProperties(&props, 0) != hipSuccess) {
+            return false;
+        }
+        return std::strncmp(props.gcnArchName, "gfx12", 5) == 0;
+    }();
+    return available;
+}
+#endif
+
+}  // namespace
 
 Model::~Model() { close(); }
 
@@ -202,6 +237,11 @@ int Model::matvec_int4x(std::string_view name, const void* x_int4, std::int32_t*
     }
 
 #ifdef ROCMINFER_HAVE_HIP
+    if (int4_matvec_iu4_is_available() && rows >= kInt4MatvecIu4MinRows &&
+        (rows % 16) == 0 && (cols % 16) == 0) {
+        return int4_matvec_iu4_i32_traced(recorder, y, slot->device.ptr(), x_int4,
+                                         rows, cols, stream);
+    }
     return int4_matvec_i32_traced(recorder, y, slot->device.ptr(), x_int4,
                                  rows, cols, stream);
 #else

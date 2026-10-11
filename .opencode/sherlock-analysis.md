@@ -544,7 +544,7 @@ that a hardware instruction must win.
 Why it is slower is **hypothesis, not proof**: one wave owns 16 rows, so at
 rows=64 the tile path runs 4 blocks x 32 threads against the row-wise kernel's
 64 blocks x 256 threads, which points at a parallelism deficit rather than a
-matrix-core deficit. No shape sweep was run, because the bench workload is fixed
+WMMA deficit. No shape sweep was run, because the bench workload is fixed
 at 64x512. Falsifying this requires sweeping rows at fixed cols and seeing
 whether the ratio crosses 1.0; that measurement was not taken.
 
@@ -597,7 +597,7 @@ one wave owns 16 rows and each wave walks 16 K-steps of a 16x16x16 tile.
 RUN-011 concluded "the hardware path is slower, keep the row-wise dispatch" from
 a single measurement at rows=64. That was a shape-bound result generalised to all
 shapes. The hypothesis recorded in RUN-011 (parallelism deficit at small `rows`,
-not a matrix-core deficit) is what the sweep confirms: at rows=64 the IU4 path
+not a WMMA deficit) is what the sweep confirms: at rows=64 the IU4 path
 runs 4 blocks x 32 threads against the row-wise 64 x 256, and as `rows` grows the
 IU4 wave count grows while its per-wave work does not, so its cost flattens.
 
@@ -819,3 +819,97 @@ identified.
   device-path memory errors are not covered by this build.
 - gfx1031 runtime numbers remain unmeasured (no local gfx1031 part); MACX
   (rr@10.0.0.11, source at `C:\x`) is the intended host.
+
+
+## [RUN-013] 2026-10-11 — MODE: FULL — shape-based int4 dispatch shipped; RDNA2 proven to have NO WMMA
+
+### SHAPE-BASED DISPATCH: IMPLEMENTED
+
+`Model::matvec_int4x` now picks the int4 path from `rows`, using the RUN-012
+measurement rather than a single point:
+
+- `kInt4MatvecIu4MinRows = 256` (`include/rocminfer/int4_wmma.hpp`) — the smallest
+  *measured* shape at which the IU4 tile wins, backed by measurements on both
+  sides (rows=128 row-wise wins 1.34x; rows=256 IU4 wins 0.77x)
+- `rows >= 256` AND `rows % 16 == 0` AND `cols % 16 == 0` → IU4 tile
+- otherwise the row-wise kernel, which only needs `cols % 8 == 0`
+
+The alignment guard is a genuine precondition, not politeness: the tile owns
+exactly 16 rows per wave and steps exactly 16 K channels, so a shape it cannot
+express has to go to the kernel that can express it rather than be rounded.
+
+**Why the arch test is a runtime query, not `__gfx1201__`.** `__gfx1201__` is a
+device-compilation macro and is not reliably visible from a host translation unit.
+Testing it from host code can silently answer false on a machine that does have
+the instruction, and a dispatch that quietly never selects its fast path is
+exactly the silent failure `AGENTS.md` forbids. So `int4_matvec_iu4_is_available()`
+caches one `hipGetDeviceProperties` query and matches the `gfx12` prefix, which
+covers gfx1200/1201/1250 so a new RDNA4 derivative does not silently lose the fast
+path.
+
+Verified, not assumed: a standalone probe against this device prints
+`arch=gfx1201  iu4_available=1`, so the branch is live rather than dead code.
+Without that check the dispatch could have looked correct and never been taken.
+
+`ctest` is **17/17** and the full 20-target build is warning-free.
+
+**Registering a genuine int4 weight format so `matvec_int4x` has a real caller is
+still not done**, and it is not gated by anything in this change: ggml defines no
+raw-int4 type, so an engine-internal format needs a type id and a decision. Until
+then the unit tests exercise the kernels directly and the Model entry point keeps
+its structural rejection of Codebook10 tensors.
+
+### ISA TERMINOLOGY AND A FACTUAL CORRECTION
+
+Corrected across `docs/AMD_CAPABILITY_MATRIX.md`, `AGENTS.md`,
+`.opencode/sherlock-analysis.md`, `src/kernels/int4_wmma.hip` and
+`include/rocminfer/model.hpp`: "matrix core" is now WMMA, and the instruction
+under discussion is `v_wmma_i32_16x16x16_iu4`.
+
+**RDNA2 (gfx1031) has NO WMMA. Proven, not assumed:**
+
+1. rocWMMA `internal/config.hpp` (ROCm 7.16, `G:\ROCM10RT-gfx1201\include\rocwmma\`)
+   enumerates GFX908/90a/942/950, GFX1100/1101/1102/1103/1150/1151/1152/1153 and
+   GFX1200/1201/1250, then `static_assert(0, "Unsupported architecture")`.
+   **No gfx103x target appears at all.** This also confirms the existing
+   `CMakeLists.txt` comment about the rocWMMA static_assert.
+2. `llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1031` **parses** the mnemonic and
+   refuses it: `error: instruction not supported on this GPU (gfx1031):
+   v_wmma_f32_16x16x16_f16`.
+
+The first `llvm-mc` attempt was worthless and is recorded because it could have
+produced a false negative: run without `-triple=amdgcn-amd-amdhsa` it defaulted to
+an x86 target and reported `invalid instruction mnemonic`, which reads like "this
+arch has no such instruction" while actually meaning nothing at all. Fixed by
+passing the triple.
+
+**Wave width per family**, from the same rocWMMA `internal/config.hpp`:
+GFX9 (CDNA) wave64; GFX11 (RDNA3) wave32; GFX12 (RDNA4) wave32. Both RDNA2 and
+RDNA4 are wave32, so there is no wave64 emulation penalty on either side; that
+penalty is a CDNA problem.
+
+**Cost arithmetic that follows, and it is why RDNA2 is the weak int4 target:**
+one `v_wmma_i32_16x16x16_iu4` issues a full 16×16×16 tile = 4096 int4 MACs. One
+`v_dot8_i32_i4` does 8. So the same tile costs **512** instructions on gfx1031
+instead of 1. This is consistent with, and independently explains, the crossover
+measured in RUN-012.
+
+### VENDOR LIBRARIES — a capability note
+
+`G:\ROCM10RT-gfx1201\lib` ships `hipblas.lib`, `hipsolver.lib`, `rocblas.lib` and
+friends, but **no `hipblaslt.lib` is present in this ROCm 7.16 install**. So
+"gfx1201 goes via hipBLASLt" is where ROCm is heading, not what this tree can link
+today; `hipblas` is what is linkable, and the WMMA tile is the right path only for
+int4-shaped work that is not a GEMM. Recorded in the capability matrix §0 so nobody
+designs around a library that cannot be linked here. RDNA2 being second-class
+looks the same from the library side as it does from the ISA side.
+
+### STILL OPEN (tracked, not faked)
+- A genuine int4 weight format + type id so `matvec_int4x` has a real caller.
+- The FP4 nibble order for DeepSeek KV interop (needs tilelang codegen or a
+  `torch.compile` path; neither authorised here).
+- The ~400 us/launch bench stall source from RUN-010 remains unresolved, so every
+  number here is one significant figure.
+- gfx1031 runtime numbers are still unmeasured — no RDNA2 silicon locally; MACX
+  (rr@10.0.0.11, source at `C:\x`) is the intended host.
+

@@ -36,6 +36,26 @@ inline constexpr unsigned int kInt4WmmaWaveThreads = 32u;
 /// (`int4_matvec_iu4_i32`), so both `rows` and `cols` must be multiples of it.
 inline constexpr int kInt4WmmaTile = 16;
 
+/// First row count at which the IU4 tile beats the row-wise int4 matvec.
+///
+/// Measured on gfx1201 at cols=512, best of five timed passes (sherlock RUN-012),
+/// us/launch:
+///
+///     rows   row-wise    IU4    ratio
+///      128      1.336   1.792    1.34x   row-wise wins
+///      256      2.671   2.061    0.77x   IU4 wins
+///
+/// 256 is the smallest *measured* shape at which the tile wins, so the threshold
+/// rests on a measurement on both sides rather than on an interpolation between
+/// two points. The crossover itself lies somewhere in (128, 256) and was not
+/// localised; a finer sweep would move this number, and the row-wise kernel
+/// remains the correct choice for every shape below it.
+///
+/// @note `rows % kInt4WmmaTile == 0` and `cols % kInt4WmmaTile == 0` are separate
+///       preconditions enforced by the caller, because the tile path cannot
+///       express a partial row or a partial K step.
+inline constexpr std::int64_t kInt4MatvecIu4MinRows = 256;
+
 /**
  * @brief Compute one 16x16 int32 output tile from two packed signed-int4 tiles.
  *

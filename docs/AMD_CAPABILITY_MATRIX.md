@@ -11,6 +11,29 @@ the inline-asm / builtin pass/fail captured verbatim.
 Two compile results are reproduced in the Verification column exactly as the compiler
 spoke, so the matrix never claims what was not tested.
 
+## 0. Before you hand-roll a GEMM: check the vendor library first
+
+The architectures ROCm supports well are not symmetric, and that asymmetry should
+decide where effort goes:
+
+- **gfx1201 / GFX12 (RDNA4)** is a first-class ROCm target. For general GEMM the
+  right answer is `hipBLASLt`, and for narrow decode-shaped work the hardware
+  `v_wmma_i32_16x16x16_iu4` path this repo ships. Hand-rolled tiled GEMM on top of
+  that is only justified where the shape is unlike a GEMM, such as the broadcast
+  matvec in `int4_matvec_iu4_i32`.
+- **gfx1031 / GFX10 (RDNA2) is a second-class ROCm target.** rocWMMA does not list
+  it (§1), int4 has no WMMA (§1), and library coverage is thinner. Its int4 path is
+  `v_dot8_i32_i4`, and the cost of a 16x16x16 tile there is 512 of those
+  instructions rather than one WMMA (§1). Plan for the RDNA2 path to be a
+  different, slower implementation, not the same code at a different clock.
+
+**Verified on this host, 2026-10-11:** `G:\ROCM10RT-gfx1201\lib` ships
+`hipblas.lib`, `hipsolver.lib`, `rocblas.lib` and friends, but **no
+`hipblaslt.lib` is present in this ROCm 7.16 install**. So the "gfx1201 goes via
+hipBLASLt" guidance above describes where ROCm is heading, not what this tree can
+link today: anything using it has to bring its own hipBLASLt, and until then
+`hipblas` (or the WCMA tile, for int4-shaped work) is what is actually linkable.
+
 ## Status legend
 
 | Status | Meaning |
@@ -32,6 +55,36 @@ on `G:\ROCM10RT-gfx1031` (ROCm 7.16, Clang 23, `amdgpu10.31`) and
 ---
 
 ## 1. Integer dot products (the gfx1031 headline question) — gfx1031 CONFIRMED; gfx1201 REJECTED for sdot8 (local probe)
+
+**What each family's int4 path actually is, per target — this is the load-bearing
+table, and the terminology matters:**
+
+| Family | Wave width | int4 hardware path | Evidence |
+|---|---|---|---|
+| GFX12 (`gfx1200/1201/1250`, RDNA4) | wave32 | `v_wmma_i32_16x16x16_iu4` — one instruction issues a whole 16x16x16 tile | emitted by this repo, see §2.1 and RUN-011 |
+| GFX11 (`gfx11xx/gfx115x`, RDNA3) | wave32 | WCMA exists but **no iu4 variant** | rocWMMA `internal/config.hpp` lists GFX11 as wave32; no sub-byte op is reachable |
+| GFX10 (`gfx1030/1031/1032`, RDNA2) | wave32 | `v_dot8_i32_i4` (`sdot8`, the dp4a-style dot) — **no WMMA at all** | see below |
+| GFX9 (CDNA) | wave64 | `v_mfma_*` | rocWMMA `internal/config.hpp`: "wave64 for gfx9 arch" |
+
+**RDNA2 has no WMMA. Proven locally, not assumed:** rocWMMA's
+`internal/config.hpp` (ROCm 7.16, `G:\ROCM10RT-gfx1201\include\rocwmma\`) enumerates
+`GFX908/90a/942/950`, `GFX1100/1101/1102/1103/1150/1151/1152/1153` and
+`GFX1200/1201/1250`, and then `static_assert(0, "Unsupported architecture")`. **No
+gfx103x target appears.** Separately, LLVM parses the mnemonic and refuses it:
+
+```
+$ llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx1031
+error: instruction not supported on this GPU (gfx1031): v_wmma_f32_16x16x16_f16
+```
+
+So the mnemonic is known to the assembler but gated off for RDNA2. An earlier
+claim in this project that "gfx1031 has WCMA" was wrong and is corrected here.
+
+**Cost comparison that follows from the above.** One `v_wmma_i32_16x16x16_iu4`
+covers a 16x16x16 tile = 4096 int4 MACs in one instruction. One `v_dot8_i32_i4`
+does 8. The same tile on gfx1031 therefore costs **512** instructions instead of
+1, which is the arithmetic behind the int4 crossover measured in RUN-012.
+
 
 These are the ROCmFPX / NInferFPX dequant "multiply packed low-bit weights" primitives.
 `sdot8` processes 8 signed nibbles (4-bit) per instruction — one instruction replaces the
@@ -64,13 +117,13 @@ Compile `-target amdgcn-amd-amdhsa -mcpu=gfx1031 -O2 -S`; inspect `.s` for `v_do
 
 ---
 
-## 2. Matrix / WMMA (the gfx1201 headline; gfx1031 has NO matrix core)
+## 2. Matrix / WMMA (the gfx1201 headline; gfx1031 has NO WMMA — rocWMMA excludes it and llvm-mc refuses the mnemonic)
 
 ### 2.1 Dense WMMA — CONFIRMED on gfx1201; UNAVAILABLE on gfx1031
 
 | ISA opcode (RDNA4) | Inputs → Accum | gfx1031 | gfx1201 | Compiler builtin | Evidence |
 |---|---|---|---|---|---|
-| `V_WMMA_I32_16X16X16_IU4` | INT4 × INT4 → INT32 | UNAVAILABLE (no matrix core) | **IN-TREE** | `__builtin_amdgcn_wmma_i32_16x16x16_iu4_w32_gfx12` | rdna4 ISA p.5206; ck_tile `wmma_gfx12.hpp` instantiates it; `rocwmma_test_gfx1201.kpack` ships. |
+| `V_WMMA_I32_16X16X16_IU4` | INT4 × INT4 → INT32 | **UNAVAILABLE (no WMMA at all: rocWMMA omits gfx103x, and llvm-mc refuses the mnemonic)** | **IN-TREE** | `__builtin_amdgcn_wmma_i32_16x16x16_iu4_w32_gfx12` | rdna4 ISA p.5206; ck_tile `wmma_gfx12.hpp` instantiates it; `rocwmma_test_gfx1201.kpack` ships. |
 | `V_WMMA_I32_16X16X32_IU4` | INT4 × INT4 (deeper K) → INT32 | UNAVAILABLE | IN-TREE | `__builtin_amdgcn_wmma_i32_16x16x32_iu4_w32_gfx12` | rdna4; ck_tile:185-193 uses `int32x2_t` tile registers. |
 | `V_WMMA_I32_16X16X16_IU8` | INT8 × INT8 → INT32 | UNAVAILABLE | IN-TREE | `__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32_gfx12` | rdna4; rocwmma + ck_tile. |
 | `V_WMMA_F32_16X16X16_F16` | FP16 × FP16 → FP32 | UNAVAILABLE | IN-TREE | `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12` | rdna4 ISA p.5201; rdna4_ch16_vopd + ch7 packed F16. |
@@ -82,7 +135,7 @@ Compile `-target amdgcn-amd-amdhsa -mcpu=gfx1031 -O2 -S`; inspect `.s` for `v_do
 **Compiler-verified gate (ROCm 7.16):** `#include <rocwmma/rocwmma.hpp>` compiled with
 `-x hip --offload-arch=gfx1031` fails `error: static assertion failed: Unsupported architecture` at
 `rocwmma/internal/layout/config.hpp:91`. rocWMMA is GFx12-class only (RDNA4/CDNA) — there is **no**
-matrix core on gfx1031, and the rocWMMA source files (`matmul_wmma.hip`, `rocmfp4_wmma_dot.hip`)
+WMMA on gfx1031, and the rocWMMA source files (`matmul_wmma.hip`, `rocmfp4_wmma_dot.hip`)
 **must be CMake-gated out** when building for gfx1031 (the include hard-fails before any C++ macro).
 gfx1201 emits real `v_wmma_*` (sherlock RUN-004; ~1.99 µs/tile on RX 9070 XT, RUN-006). So "WMMA" in
 this table is a **gfx1201-only** fast path, not a portable one.
@@ -187,7 +240,7 @@ WMMA remainder leaves; **named barriers** (`s_barrier_*`, 2.5) give producer/con
 Net: **one tile_loader feeds WMMA on gfx1201 — keep the rocWMMA path, no change needed.**
 
 **gfx1031 (RDNA2): composable, but scalar-dot tiling only — no wave-matrix.** No WMMA (no
-matrix core); no `v_dual_*` (no VOPD); no named barriers (no partial-wg sync → use full `s_barrier`/
+WMMA); no `v_dual_*` (no VOPD); no named barriers (no partial-wg sync → use full `s_barrier`/
 `sched_barrier(0)`); no `s_buffer_prefetch` (prefetch tiles from VGPR/LDS manually); and **no BF16
 dot2** (the `v_dot2acc_f32_bf16` asm is a §8a trap — BF16 dense must route through
 `v_dot2acc_f32_f16`/`v_dot2c_f32_f16` after casting BF16→FP16, or scalar f32). Real kit on gfx1031:
@@ -197,7 +250,7 @@ transpose into VGPRs), `s_buffer_load_b32` (SMEM), `sched_barrier(0)`+`s_waitcnt
 
 **Verdict:** on gfx1201 the extensions compose into a real wave-matrix pipeline (WMMA + dual-dot2 +
 named-barrier + prefetch). On gfx1031 they compose only into a scalar-dot wave-tile that still
-accelerates the int4/int8/i16/FP16 paths — but NOT a matrix core, NOT BF16 dot2, NOT partial-wg
+accelerates the int4/int8/i16/FP16 paths — but NOT a WMMA path, NOT BF16 dot2, NOT partial-wg
 sync. The async/TMA branch is dead on both; the sync double-buffer tile_loader is the one
 abstraction that wins on both targets.
 
@@ -267,7 +320,7 @@ Why it is fastest here:
   `rocwmma_test_gfx1201.kpack`).
 - On **gfx1031** the same 2-stage fill feeds `v_dot8_i32_i4` (verified in
   §1, `_probe_sdot8_gfx1031.s`) / `v_dot4_i32_i8` / `v_fdot2_f32_f16` — no
-  matrix core, so this sync fill is strictly the fastest available.
+  WMMA, so this sync fill is strictly the fastest available.
 
 > So: one `tile_loader` abstraction = coalesced `global_load`+`ds_write`,
 > double-buffered, sched-barrier drained. It is the fastest floor on both

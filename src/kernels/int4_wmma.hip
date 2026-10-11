@@ -87,7 +87,7 @@ __device__ inline std::uint32_t load_u32_le(const std::uint8_t* p) noexcept {
  *         magnitude, so int32 is exact.
  * @pre `a_row` is 4-byte aligned; `n < 16`.
  * @note Inner product is `sdot8` on gfx1031, scalar nibbles elsewhere (the
- *       sdot8 builtin is rejected on gfx1201, hence the gate).
+ *       refuses the mnemonic), so one lane per output row
  */
 __device__ inline std::int32_t dot_a_row_b_col(const std::uint8_t* a_row,
                                                const std::uint8_t* b,
@@ -272,7 +272,7 @@ int int4_wmma_16x16_traced(TraceRecorder& recorder, int32_t* c, const void* a,
  *      produced for any column index. Accumulator slot `s` of a lane in group
  *      `g` is therefore the partial dot of row `row_base + g*8 + s` against the
  *      step's slice, and it is stored to `y` without a column index.
- * @note gfx1031 and host: no matrix core, so one lane per output row
+ * @note gfx1031 and host: no WMMA at all (rocWMMA omits gfx103x and llvm-mc
  *      (16 of the 32 lanes) accumulates the row's 8-weight groups with
  *      `__builtin_amdgcn_sdot8` on gfx1031 and a scalar nibble product
  *      elsewhere, the same gate `int4_matvec.hip` uses because the local ROCm
@@ -435,7 +435,7 @@ int int4_matvec_iu4_i32(std::int32_t* y, const void* W, const void* x,
  * @param[in]  stream   HIP stream, or nullptr.
  * @return Exactly what `int4_matvec_iu4_i32` returns.
  * @pre Every precondition of `int4_matvec_iu4_i32`; the device kernel is
- *      compiled for a matrix-core target (gfx1201) for the WMMA path, and the
+ *      compiled for a WMMA target (gfx1201), and the
  *      exact sdot8/scalar fallback covers every other target.
  * @post On success the launch is enqueued and the scope closed; device timing is
  *       pending until `TraceRecorder::resolve_pending` is called.
